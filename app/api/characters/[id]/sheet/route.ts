@@ -5,6 +5,8 @@ import { COST, MODELS, STYLE_SUFFIX } from "@/lib/config";
 import { spendCredits, refundCredits } from "@/lib/credits";
 import { submitFal } from "@/lib/fal";
 
+export const maxDuration = 60;
+
 export async function POST(_: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const { supabase, user } = await getUser();
