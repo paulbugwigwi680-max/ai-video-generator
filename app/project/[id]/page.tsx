@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { signedUrl } from "@/lib/storage";
 import Storyboard, { type CharacterView, type SceneView } from "@/components/Storyboard";
+import Documentary, { type Clip } from "@/components/Documentary";
 import Logo from "@/components/Logo";
 
 export default async function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
@@ -61,19 +62,36 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
     }))
   );
 
+  // Playlist for the documentary player: one clip per shot that already has a picture or video.
+  // The scene narration is split across the scene's shots so each caption stays short.
+  const clips: Clip[] = sceneViews.flatMap((s) => {
+    const words = s.narration.split(/\s+/).filter(Boolean);
+    const per = Math.max(1, Math.ceil(words.length / Math.max(1, s.shots.length)));
+    const sceneClips = s.shots.flatMap((sh, j) => {
+      const src = sh.videoUrl ?? sh.keyframeUrl;
+      if (!src) return [];
+      const kind: Clip["kind"] = sh.videoUrl ? "video" : "image";
+      return [{ kind, src, duration: sh.duration, caption: words.slice(j * per, (j + 1) * per).join(" "), speak: "" }];
+    });
+    return sceneClips.map((c, k) => ({ ...c, speak: k === 0 ? s.narration : "" }));
+  });
+
   return (
     <>
       <header className="topbar">
         <Link href="/dashboard">
           <Logo size={36} tone="light" tagline={false} />
         </Link>
-        <span className="credits">Credits: <b>{profile?.credits ?? 0}</b></span>
+        <Link href="/credits" className="credits">
+          Credits: <b>{profile?.credits ?? 0}</b> · Nunua
+        </Link>
       </header>
       <main className="wrap">
         <div className="proj-head">
           <p className="muted"><Link href="/dashboard">Miradi yote</Link></p>
           <h1>{project.title}</h1>
         </div>
+        {clips.length > 0 && <Documentary clips={clips} title={project.title} language={project.language ?? "sw"} />}
         <Storyboard projectId={id} characters={characters} scenes={sceneViews} />
       </main>
     </>
