@@ -6,7 +6,7 @@ const head = Bricolage_Grotesque({ subsets: ["latin"], variable: "--font-bricola
 const body = Public_Sans({ subsets: ["latin"], variable: "--font-public" });
 
 export const metadata: Metadata = {
-  title: "AI Video Generator",
+  title: "BUGWIGWI | AI Video Studio",
   description: "Tengeneza video na documentary za AI zenye wahusika wasiobadilika.",
 };
 
