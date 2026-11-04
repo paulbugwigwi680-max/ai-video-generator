@@ -6,6 +6,8 @@ import { spendCredits, refundCredits } from "@/lib/credits";
 import { submitFal } from "@/lib/fal";
 import { signedUrl } from "@/lib/storage";
 
+export const maxDuration = 60;
+
 type CharRow = {
   name: string;
   age: string;
@@ -23,6 +25,8 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
   if (!shot) return NextResponse.json({ error: "Shot haijapatikana." }, { status: 404 });
   if (shot.status === "processing") return NextResponse.json({ error: "Tayari inatengenezwa." }, { status: 409 });
 
+  const demo = process.env.DEMO_MODE === "true";
+
   // Characters appearing in this shot, with their reference portraits.
   const { data } = shot.character_ids.length
     ? await supabase.from("characters").select("name,age,appearance,clothing,reference_urls").in("id", shot.character_ids)
@@ -30,7 +34,7 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
   const chars = (data ?? []) as CharRow[];
   const withRef = chars.filter((c) => c.reference_urls && c.reference_urls.length > 0);
 
-  if (chars.length > withRef.length) {
+  if (!demo && chars.length > withRef.length) {
     return NextResponse.json({ error: "Tengeneza sura za wahusika wa shot hii kwanza." }, { status: 400 });
   }
 
@@ -42,7 +46,7 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
     let model = MODELS.text2img;
     let input: Record<string, unknown>;
 
-    if (withRef.length) {
+    if (!demo && withRef.length) {
       const urls = (
         await Promise.all(withRef.map((c) => signedUrl("character-refs", c.reference_urls![0])))
       ).filter(Boolean) as string[];
@@ -55,8 +59,13 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
         output_format: "jpeg",
       };
     } else {
+      // Text-only prompt. The fixed description of each character is repeated in every
+      // shot, which keeps people looking as similar as a text model allows.
+      const people = chars
+        .map((c) => `${c.name}: ${c.age} years old, ${c.appearance}, wearing ${c.clothing}`)
+        .join(". ");
       input = {
-        prompt: `${shot.prompt}. ${STYLE_SUFFIX}`,
+        prompt: `${shot.prompt}.${people ? ` People in the scene: ${people}.` : ""} ${STYLE_SUFFIX}`,
         image_size: "landscape_16_9",
         num_images: 1,
         output_format: "jpeg",
