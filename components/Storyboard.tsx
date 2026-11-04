@@ -61,7 +61,9 @@ export default function Storyboard({
   const allShots = scenes.flatMap((s) => s.shots);
   const needChars = characters.filter((c) => c.status !== "processing" && !c.imageUrl).map((c) => `/api/characters/${c.id}/sheet`);
   const needFrames = allShots.filter((s) => s.status !== "processing" && !s.keyframeUrl).map((s) => `/api/shots/${s.id}/keyframe`);
-  const needVideos = allShots.filter((s) => s.status !== "processing" && s.keyframeUrl && !s.videoUrl).map((s) => `/api/shots/${s.id}/video`);
+  const needVideos = allShots
+    .filter((s) => s.keyframeUrl && s.status !== "processing" && s.status !== "completed")
+    .map((s) => `/api/shots/${s.id}/video`);
 
   return (
     <>
