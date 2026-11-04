@@ -21,6 +21,36 @@ type Input = {
 // Accept both UPPERCASE and lowercase variable names.
 const env = (upper: string) => process.env[upper] ?? process.env[upper.toLowerCase()];
 
+class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Retries temporary provider errors (overload / rate limit) a few times.
+// Stops early so the request still finishes inside Vercel's time limit.
+async function withRetry<T>(fn: (attempt: number) => Promise<T>, tries = 3, budgetMs = 40000): Promise<T> {
+  const start = Date.now();
+  let last: unknown;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await fn(i);
+    } catch (e) {
+      last = e;
+      const retryable = e instanceof ApiError && RETRYABLE.has(e.status);
+      const delay = 2500 * (i + 1);
+      if (!retryable || i === tries - 1 || Date.now() - start + delay > budgetMs) break;
+      await sleep(delay);
+    }
+  }
+  throw last;
+}
+
 const SYSTEM = `You are a film director and documentary writer. You turn a topic into a shot-by-shot production plan for an AI video pipeline.
 
 Rules for consistency (critical):
@@ -53,8 +83,7 @@ function parse(text: string): Plan {
 }
 
 // --- Gemini (free tier available via Google AI Studio) ---
-async function viaGemini(input: Input, apiKey: string): Promise<Plan> {
-  const model = env("GEMINI_MODEL") ?? "gemini-2.5-flash";
+async function geminiCall(input: Input, apiKey: string, model: string): Promise<Plan> {
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: "POST",
     headers: {
@@ -67,34 +96,46 @@ async function viaGemini(input: Input, apiKey: string): Promise<Plan> {
       generationConfig: { responseMimeType: "application/json", maxOutputTokens: 8192, temperature: 0.8 },
     }),
   });
-  if (!res.ok) throw new Error(`Gemini API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) {
+    throw new ApiError(`Gemini API ${res.status}: ${(await res.text()).slice(0, 300)}`, res.status);
+  }
 
   const json = await res.json();
   const parts: { text?: string }[] = json.candidates?.[0]?.content?.parts ?? [];
   return parse(parts.map((p) => p.text ?? "").join(""));
 }
 
+async function viaGemini(input: Input, apiKey: string): Promise<Plan> {
+  const primary = env("GEMINI_MODEL") ?? "gemini-3.8-flash";
+  const fallback = env("GEMINI_FALLBACK_MODEL"); // optional second model if the first is overloaded
+  return withRetry((attempt) => geminiCall(input, apiKey, attempt > 0 && fallback ? fallback : primary));
+}
+
 // --- Claude ---
 async function viaClaude(input: Input, apiKey: string): Promise<Plan> {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: env("ANTHROPIC_MODEL") ?? "claude-sonnet-5-5",
-      max_tokens: 8000,
-      system: SYSTEM,
-      messages: [{ role: "user", content: userPrompt(input) }],
-    }),
-  });
-  if (!res.ok) throw new Error(`Claude API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  return withRetry(async () => {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: env("ANTHROPIC_MODEL") ?? "claude-sonnet-5-5",
+        max_tokens: 8000,
+        system: SYSTEM,
+        messages: [{ role: "user", content: userPrompt(input) }],
+      }),
+    });
+    if (!res.ok) {
+      throw new ApiError(`Claude API ${res.status}: ${(await res.text()).slice(0, 300)}`, res.status);
+    }
 
-  const json = await res.json();
-  const text: string = (json.content ?? []).map((b: { text?: string }) => b.text ?? "").join("");
-  return parse(text);
+    const json = await res.json();
+    const text: string = (json.content ?? []).map((b: { text?: string }) => b.text ?? "").join("");
+    return parse(text);
+  });
 }
 
 // --- Demo (no API key, no cost) ---
