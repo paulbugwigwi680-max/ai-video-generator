@@ -32,7 +32,9 @@ export default async function Dashboard() {
           <Logo size={36} tone="light" tagline={false} />
         </Link>
         <span className="row">
-          <span className="credits">Credits: <b>{profile?.credits ?? 0}</b></span>
+          <Link href="/credits" className="credits">
+            Credits: <b>{profile?.credits ?? 0}</b> · Nunua
+          </Link>
           <SignOut />
         </span>
       </header>
