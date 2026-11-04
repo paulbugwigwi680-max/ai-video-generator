@@ -25,18 +25,42 @@ h1, h2, h3 { font-family: var(--font-head); line-height: 1.15; margin: 0; letter
 a { color: var(--sea-dark); }
 :focus-visible { outline: 3px solid var(--sea); outline-offset: 2px; }
 
+/* ---------- Logo ---------- */
+.logo { display: inline-flex; align-items: center; gap: 12px; }
+.logo.stacked { flex-direction: column; gap: 12px; }
+.logo svg { flex: none; display: block; }
+.logo-text { display: flex; flex-direction: column; line-height: 1; }
+.logo.stacked .logo-text { align-items: center; }
+.logo-word {
+  font-family: var(--font-head);
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  font-size: 1.25rem;
+}
+.logo.stacked .logo-word { font-size: 1.7rem; }
+.logo-tag {
+  margin-top: 6px;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.32em;
+  color: var(--sand);
+}
+.logo.dark .logo-word { color: var(--ink); }
+.logo.light .logo-word { color: #fff; }
+
+/* ---------- Top bar ---------- */
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 14px clamp(16px, 4vw, 40px);
+  padding: 12px clamp(16px, 4vw, 40px);
   background: var(--ink); color: #fff;
 }
 .topbar a { color: #fff; text-decoration: none; }
-.brand { font-family: var(--font-head); font-size: 1.25rem; font-weight: 700; }
 .credits { font-size: 0.95rem; color: #d6dde3; }
 .credits b { color: var(--sand); font-size: 1.1rem; }
 
 .wrap { max-width: 1180px; margin: 0 auto; padding: 32px clamp(16px, 4vw, 40px) 80px; }
 
+/* ---------- Buttons & inputs ---------- */
 button, .btn {
   font: inherit; font-weight: 600; cursor: pointer;
   background: var(--sea); color: #fff; border: 0; padding: 10px 16px; border-radius: 4px;
@@ -46,6 +70,12 @@ button:disabled { background: var(--line); color: var(--ink-soft); cursor: not-a
 button.ghost { background: transparent; color: var(--sea-dark); border: 1.5px solid var(--sea); }
 button.ghost:hover { background: #dcecee; }
 button.small { padding: 6px 10px; font-size: 0.85rem; }
+button.full { width: 100%; margin-top: 22px; padding: 12px 16px; font-size: 1rem; }
+button.linklike {
+  background: none; color: var(--sea-dark); padding: 4px 6px; font-weight: 600;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+button.linklike:hover { background: none; color: var(--sea); }
 
 input, textarea, select {
   font: inherit; width: 100%; padding: 10px 12px; border: 1.5px solid var(--line);
@@ -53,11 +83,34 @@ input, textarea, select {
 }
 label { display: block; font-weight: 600; font-size: 0.9rem; margin: 14px 0 6px; }
 
-.login { max-width: 400px; margin: 12vh auto; padding: 0 20px; }
-.login h1 { font-size: 2.2rem; margin-bottom: 8px; }
-.muted { color: var(--ink-soft); }
-.error { color: var(--coral); font-weight: 600; margin-top: 12px; }
+/* Password field with show/hide icon */
+.pw { position: relative; }
+.pw input { padding-right: 46px; }
+button.pw-toggle {
+  position: absolute; top: 50%; right: 4px; transform: translateY(-50%);
+  width: 38px; height: 38px; padding: 0; display: grid; place-items: center;
+  background: transparent; color: var(--ink-soft); border-radius: 4px;
+}
+button.pw-toggle:hover { background: #e6ebef; color: var(--ink); }
 
+/* ---------- Login / auth pages (centered) ---------- */
+.login {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 7vh 20px 48px;
+  text-align: center;
+}
+.login h1 { font-size: 2.1rem; margin: 22px 0 8px; }
+.login > p.muted { margin: 0 auto 8px; max-width: 34ch; }
+.login form { text-align: center; margin-top: 8px; }
+.login label { text-align: center; }
+.login input { text-align: left; }
+.auth-links { display: flex; flex-direction: column; align-items: center; gap: 6px; margin-top: 22px; }
+.muted { color: var(--ink-soft); }
+.error { color: var(--coral); font-weight: 600; margin-top: 14px; }
+.info { color: var(--sea-dark); font-weight: 600; margin-top: 14px; }
+
+/* ---------- Dashboard ---------- */
 .dash { display: grid; grid-template-columns: 1fr 380px; gap: 48px; align-items: start; }
 @media (max-width: 860px) { .dash { grid-template-columns: 1fr; } }
 .dash h2 { font-size: 1.5rem; margin-bottom: 16px; }
@@ -68,6 +121,7 @@ label { display: block; font-weight: 600; font-size: 0.9rem; margin: 14px 0 6px;
 .projects .t { font-weight: 600; }
 .panel { background: var(--paper); border-left: 4px solid var(--sea); padding: 20px 22px 24px; }
 
+/* ---------- Project page ---------- */
 .proj-head { margin-bottom: 28px; }
 .proj-head h1 { font-size: clamp(1.8rem, 4vw, 2.6rem); }
 .bulk { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
