@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import Logo from "@/components/Logo";
@@ -69,69 +70,90 @@ export default function Login() {
   const subtitle =
     mode === "forgot"
       ? "Andika barua pepe yako, tutakutumia kiungo cha kuweka nenosiri jipya."
-      : "Tengeneza video za AI zenye wahusika wasiobadilika.";
+      : mode === "up"
+        ? "Jisajili kutengeneza documentary yako ya kwanza."
+        : "Ingia uendelee na miradi yako.";
   const action = mode === "in" ? "Ingia" : mode === "up" ? "Fungua akaunti" : "Tuma kiungo";
 
   return (
-    <main className="login">
-      <Logo stacked size={72} />
-      <h1>{title}</h1>
-      <p className="muted">{subtitle}</p>
+    <main className="auth-page">
+      <div className="auth-card">
+        <div className="auth-logo">
+          <Logo stacked size={64} />
+        </div>
 
-      <form onSubmit={submit}>
-        <label htmlFor="email">Barua pepe</label>
-        <input
-          id="email"
-          type="email"
-          required
-          autoComplete="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
+        <h1>{title}</h1>
+        <p className="auth-sub">{subtitle}</p>
 
-        {mode !== "forgot" && (
-          <>
-            <label htmlFor="pw">Nenosiri</label>
-            <PasswordInput
-              id="pw"
-              value={password}
-              onChange={setPassword}
-              minLength={8}
-              autoComplete={mode === "in" ? "current-password" : "new-password"}
+        <form onSubmit={submit}>
+          <div className="field">
+            <label htmlFor="email">Barua pepe</label>
+            <input
+              id="email"
+              type="email"
+              required
+              autoComplete="email"
+              placeholder="jina@mfano.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
             />
-          </>
-        )}
+          </div>
 
-        <button type="submit" className="full" disabled={busy}>
-          {busy ? "Subiri…" : action}
-        </button>
+          {mode !== "forgot" && (
+            <div className="field">
+              <label htmlFor="pw">Nenosiri</label>
+              <PasswordInput
+                id="pw"
+                value={password}
+                onChange={setPassword}
+                minLength={8}
+                autoComplete={mode === "in" ? "current-password" : "new-password"}
+              />
+            </div>
+          )}
 
-        {error && <p className="error" role="alert">{error}</p>}
-        {info && <p className="info" role="status">{info}</p>}
-      </form>
+          {mode === "in" && (
+            <div className="forgot-row">
+              <button type="button" className="linklike" onClick={() => switchMode("forgot")}>
+                Umesahau nenosiri?
+              </button>
+            </div>
+          )}
 
-      <div className="auth-links">
-        {mode === "in" && (
-          <>
-            <button type="button" className="linklike" onClick={() => switchMode("forgot")}>
-              Umesahau nenosiri?
-            </button>
-            <button type="button" className="linklike" onClick={() => switchMode("up")}>
-              Sina akaunti? Fungua
-            </button>
-          </>
-        )}
-        {mode === "up" && (
-          <button type="button" className="linklike" onClick={() => switchMode("in")}>
-            Tayari una akaunti? Ingia
+          <button type="submit" className="full" disabled={busy}>
+            {busy ? "Subiri…" : action}
           </button>
-        )}
-        {mode === "forgot" && (
-          <button type="button" className="linklike" onClick={() => switchMode("in")}>
-            Rudi kuingia
-          </button>
-        )}
+
+          {error && <p className="error" role="alert">{error}</p>}
+          {info && <p className="info" role="status">{info}</p>}
+        </form>
+
+        <div className="auth-switch">
+          {mode === "in" && (
+            <>
+              Huna akaunti?{" "}
+              <button type="button" className="linklike" onClick={() => switchMode("up")}>
+                Fungua akaunti
+              </button>
+            </>
+          )}
+          {mode === "up" && (
+            <>
+              Tayari una akaunti?{" "}
+              <button type="button" className="linklike" onClick={() => switchMode("in")}>
+                Ingia
+              </button>
+            </>
+          )}
+          {mode === "forgot" && (
+            <button type="button" className="linklike" onClick={() => switchMode("in")}>
+              Rudi kuingia
+            </button>
+          )}
+        </div>
       </div>
+
+      <Link href="/" className="auth-back">← Rudi mwanzo</Link>
     </main>
   );
 }
