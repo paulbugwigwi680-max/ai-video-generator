@@ -6,6 +6,8 @@ export async function spendCredits(userId: string, amount: number) {
   return data === true;
 }
 
-export async function refundCredits(userId: string, amount: number) {
+export async function addCredits(userId: string, amount: number) {
   await adminClient().rpc("refund_credits", { p_user: userId, p_amount: amount });
 }
+
+export const refundCredits = addCredits;
