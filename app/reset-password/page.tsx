@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import Logo from "@/components/Logo";
@@ -43,31 +44,43 @@ export default function ResetPassword() {
   }
 
   return (
-    <main className="login">
-      <Logo stacked size={64} />
-      <h1>Weka nenosiri jipya</h1>
+    <main className="auth-page">
+      <div className="auth-card">
+        <div className="auth-logo">
+          <Logo stacked size={64} />
+        </div>
 
-      {!ready ? (
-        <p className="muted">Inapakia…</p>
-      ) : !hasSession ? (
-        <>
-          <p className="error">Kiungo hiki kimeisha muda au si sahihi.</p>
-          <p>
-            <a href="/login">Rudi kwenye ukurasa wa kuingia</a> na uombe kiungo kipya.
-          </p>
-        </>
-      ) : (
-        <form onSubmit={submit}>
-          <label htmlFor="pw">Nenosiri jipya</label>
-          <PasswordInput id="pw" value={password} onChange={setPassword} minLength={8} autoComplete="new-password" />
-          <label htmlFor="pw2">Rudia nenosiri</label>
-          <PasswordInput id="pw2" value={confirm} onChange={setConfirm} minLength={8} autoComplete="new-password" />
-          <button type="submit" className="full" disabled={busy}>
-            {busy ? "Inahifadhi…" : "Hifadhi nenosiri"}
-          </button>
-          {error && <p className="error">{error}</p>}
-        </form>
-      )}
+        <h1>Weka nenosiri jipya</h1>
+
+        {!ready ? (
+          <p className="auth-sub">Inapakia…</p>
+        ) : !hasSession ? (
+          <>
+            <p className="error">Kiungo hiki kimeisha muda au si sahihi.</p>
+            <div className="auth-switch">
+              <Link href="/login">Rudi kuingia</Link> na uombe kiungo kipya.
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="auth-sub">Chagua nenosiri lenye angalau herufi 8.</p>
+            <form onSubmit={submit}>
+              <div className="field">
+                <label htmlFor="pw">Nenosiri jipya</label>
+                <PasswordInput id="pw" value={password} onChange={setPassword} minLength={8} autoComplete="new-password" />
+              </div>
+              <div className="field">
+                <label htmlFor="pw2">Rudia nenosiri</label>
+                <PasswordInput id="pw2" value={confirm} onChange={setConfirm} minLength={8} autoComplete="new-password" />
+              </div>
+              <button type="submit" className="full" disabled={busy}>
+                {busy ? "Inahifadhi…" : "Hifadhi nenosiri"}
+              </button>
+              {error && <p className="error" role="alert">{error}</p>}
+            </form>
+          </>
+        )}
+      </div>
     </main>
   );
 }
