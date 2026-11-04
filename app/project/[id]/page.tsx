@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { signedUrl } from "@/lib/storage";
 import Storyboard, { type CharacterView, type SceneView } from "@/components/Storyboard";
+import Logo from "@/components/Logo";
 
 export default async function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -63,7 +64,9 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   return (
     <>
       <header className="topbar">
-        <Link href="/dashboard" className="brand">AI Video Generator</Link>
+        <Link href="/dashboard">
+          <Logo size={36} tone="light" tagline={false} />
+        </Link>
         <span className="credits">Credits: <b>{profile?.credits ?? 0}</b></span>
       </header>
       <main className="wrap">
