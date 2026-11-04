@@ -21,6 +21,7 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const payload = body.payload ?? {};
   const success = body.status === "OK" && !body.error;
+  const skip = kind === "video" && payload.skip === true; // demo mode: no video file
   const mediaUrl: string | undefined = kind === "video" ? payload.video?.url : payload.images?.[0]?.url;
   const db = adminClient();
 
@@ -34,20 +35,24 @@ export async function POST(req: NextRequest) {
   const userId = project.user_id as string;
 
   try {
-    if (!success || !mediaUrl) throw new Error(typeof body.error === "string" ? body.error : "Generation failed");
-
-    if (kind === "character") {
-      const path = `${userId}/${row.project_id}/${id}-${Date.now()}.jpg`;
-      await storeFromUrl("character-refs", path, mediaUrl);
-      await db.from("characters").update({ reference_urls: [path], status: "completed", error: null }).eq("id", id);
-    } else if (kind === "keyframe") {
-      const path = `${userId}/${row.project_id}/${id}-${Date.now()}.jpg`;
-      await storeFromUrl("keyframes", path, mediaUrl);
-      await db.from("shots").update({ keyframe_url: path, status: "draft", error: null }).eq("id", id);
+    if (skip) {
+      await db.from("shots").update({ status: "completed", error: null }).eq("id", id);
     } else {
-      const path = `${userId}/${row.project_id}/${id}.mp4`;
-      await storeFromUrl("videos", path, mediaUrl);
-      await db.from("shots").update({ video_url: path, status: "completed", error: null }).eq("id", id);
+      if (!success || !mediaUrl) throw new Error(typeof body.error === "string" ? body.error : "Generation failed");
+
+      if (kind === "character") {
+        const path = `${userId}/${row.project_id}/${id}-${Date.now()}.jpg`;
+        await storeFromUrl("character-refs", path, mediaUrl);
+        await db.from("characters").update({ reference_urls: [path], status: "completed", error: null }).eq("id", id);
+      } else if (kind === "keyframe") {
+        const path = `${userId}/${row.project_id}/${id}-${Date.now()}.jpg`;
+        await storeFromUrl("keyframes", path, mediaUrl);
+        await db.from("shots").update({ keyframe_url: path, status: "draft", error: null }).eq("id", id);
+      } else {
+        const path = `${userId}/${row.project_id}/${id}.mp4`;
+        await storeFromUrl("videos", path, mediaUrl);
+        await db.from("shots").update({ video_url: path, status: "completed", error: null }).eq("id", id);
+      }
     }
   } catch (e) {
     const refund = kind === "character" ? COST.character : kind === "keyframe" ? COST.keyframe : videoCost(row.duration_seconds);
