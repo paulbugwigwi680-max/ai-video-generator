@@ -3,9 +3,6 @@ import { appUrl } from "@/lib/config";
 
 export type HookKind = "character" | "keyframe" | "video";
 
-// Free sample video (CC0) used only in DEMO_MODE.
-const DEMO_VIDEO = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
-
 function hookUrl(kind: HookKind, id: string) {
   const hook = new URL(`${appUrl()}/api/webhooks/fal`);
   hook.searchParams.set("kind", kind);
@@ -14,25 +11,32 @@ function hookUrl(kind: HookKind, id: string) {
   return hook.toString();
 }
 
+// Free text-to-image service (no API key). Used only in DEMO_MODE so that
+// the pictures match the prompts at zero cost.
+function freeImage(prompt: string, width: number, height: number) {
+  const seed = Math.floor(Math.random() * 1_000_000);
+  return `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt.slice(0, 900))}?width=${width}&height=${height}&model=flux&nologo=true&seed=${seed}`;
+}
+
 /**
  * Submits a job to the fal.ai queue and returns immediately with a request id.
  * fal calls our webhook when the job is done, so Vercel never waits for generation.
  *
- * With DEMO_MODE=true nothing is sent to fal.ai (no cost): after a few seconds we call
- * our own webhook with a sample image/video, so the whole flow can be tested for free.
+ * DEMO_MODE=true: nothing is sent to fal.ai. Pictures come from a free generator using the
+ * real prompts, and the "video" step is skipped (the player animates the pictures instead).
  */
 export async function submitFal(model: string, input: Record<string, unknown>, kind: HookKind, id: string) {
   const hook = hookUrl(kind, id);
 
   if (process.env.DEMO_MODE === "true") {
     const requestId = `demo-${crypto.randomUUID()}`;
+    const prompt = String(input.prompt ?? "");
     after(async () => {
-      await new Promise((r) => setTimeout(r, 4000));
-      const size = kind === "character" ? "720/960" : "1280/720";
+      const portrait = kind === "character";
       const payload =
         kind === "video"
-          ? { video: { url: DEMO_VIDEO } }
-          : { images: [{ url: `https://picsum.photos/seed/${id}-${Date.now()}/${size}` }] };
+          ? { skip: true }
+          : { images: [{ url: freeImage(prompt, portrait ? 768 : 1280, portrait ? 1024 : 720) }] };
       await fetch(hook, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
