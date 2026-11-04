@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import NewProjectForm from "@/components/NewProjectForm";
 import SignOut from "@/components/SignOut";
+import Logo from "@/components/Logo";
 
 const STATUS: Record<string, string> = {
   draft: "Inaandaliwa",
@@ -27,7 +28,9 @@ export default async function Dashboard() {
   return (
     <>
       <header className="topbar">
-        <span className="brand">AI Video Generator</span>
+        <Link href="/dashboard">
+          <Logo size={36} tone="light" tagline={false} />
+        </Link>
         <span className="row">
           <span className="credits">Credits: <b>{profile?.credits ?? 0}</b></span>
           <SignOut />
