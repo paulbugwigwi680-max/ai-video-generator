@@ -18,6 +18,9 @@ type Input = {
   shotsPerScene: number;
 };
 
+// Accept both UPPERCASE and lowercase variable names.
+const env = (upper: string) => process.env[upper] ?? process.env[upper.toLowerCase()];
+
 const SYSTEM = `You are a film director and documentary writer. You turn a topic into a shot-by-shot production plan for an AI video pipeline.
 
 Rules for consistency (critical):
@@ -50,12 +53,12 @@ function parse(text: string): Plan {
 }
 
 // --- Gemini (free tier available via Google AI Studio) ---
-async function viaGemini(input: Input): Promise<Plan> {
-  const model = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
+async function viaGemini(input: Input, apiKey: string): Promise<Plan> {
+  const model = env("GEMINI_MODEL") ?? "gemini-2.5-flash";
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: "POST",
     headers: {
-      "x-goog-api-key": process.env.GEMINI_API_KEY!,
+      "x-goog-api-key": apiKey,
       "content-type": "application/json",
     },
     body: JSON.stringify({
@@ -72,16 +75,16 @@ async function viaGemini(input: Input): Promise<Plan> {
 }
 
 // --- Claude ---
-async function viaClaude(input: Input): Promise<Plan> {
+async function viaClaude(input: Input, apiKey: string): Promise<Plan> {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
-      "x-api-key": process.env.ANTHROPIC_API_KEY!,
+      "x-api-key": apiKey,
       "anthropic-version": "2023-06-01",
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5",
+      model: env("ANTHROPIC_MODEL") ?? "claude-sonnet-5-5",
       max_tokens: 8000,
       system: SYSTEM,
       messages: [{ role: "user", content: userPrompt(input) }],
@@ -137,8 +140,13 @@ function demoPlan(input: Input): Plan {
 }
 
 export async function planProject(input: Input): Promise<Plan> {
-  if (process.env.GEMINI_API_KEY) return viaGemini(input);
-  if (process.env.ANTHROPIC_API_KEY) return viaClaude(input);
-  if (process.env.DEMO_MODE === "true") return demoPlan(input);
+  const geminiKey = env("GEMINI_API_KEY");
+  if (geminiKey) return viaGemini(input, geminiKey);
+
+  const anthropicKey = env("ANTHROPIC_API_KEY");
+  if (anthropicKey) return viaClaude(input, anthropicKey);
+
+  if (env("DEMO_MODE") === "true") return demoPlan(input);
+
   throw new Error("Hakuna funguo ya AI. Weka GEMINI_API_KEY, ANTHROPIC_API_KEY, au DEMO_MODE=true.");
 }
