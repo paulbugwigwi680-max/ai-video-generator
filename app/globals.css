@@ -254,3 +254,19 @@ button.pw-toggle:hover { background: #e6ebef; color: var(--ink); }
 .talk input[type="range"] { padding: 0; }
 .check { display: flex; gap: 10px; align-items: flex-start; font-weight: 500; margin-top: 18px; }
 .check input { width: auto; margin-top: 4px; }
+/* Share link (Cloudinary) */
+.share { margin-top: 16px; max-width: 960px; }
+.share label { margin: 0 0 6px; }
+.share .row input { flex: 1; min-width: 220px; }
+
+/* Voice chooser under the documentary player */
+.voice-box { margin-top: 16px; max-width: 520px; display: grid; gap: 8px; }
+.voice-box label { margin: 0; }
+
+/* Talking photo page */
+.talk { display: grid; grid-template-columns: 360px 1fr; gap: 36px; align-items: start; }
+@media (max-width: 900px) { .talk { grid-template-columns: 1fr; } }
+.talk canvas { display: block; background: #000; border-radius: 4px; }
+.talk input[type="range"] { padding: 0; }
+.check { display: flex; gap: 10px; align-items: flex-start; font-weight: 500; margin-top: 18px; }
+.check input { width: auto; margin-top: 4px; }
