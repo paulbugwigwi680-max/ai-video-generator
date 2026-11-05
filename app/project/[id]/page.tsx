@@ -91,7 +91,15 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
           <p className="muted"><Link href="/dashboard">Miradi yote</Link></p>
           <h1>{project.title}</h1>
         </div>
-        {clips.length > 0 && <Documentary clips={clips} title={project.title} language={project.language ?? "sw"} />}
+        {clips.length > 0 && (
+          <Documentary
+            clips={clips}
+            title={project.title}
+            language={project.language ?? "sw"}
+            projectId={id}
+            finalUrl={project.final_video_url ?? null}
+          />
+        )}
         <Storyboard projectId={id} characters={characters} scenes={sceneViews} />
       </main>
     </>
