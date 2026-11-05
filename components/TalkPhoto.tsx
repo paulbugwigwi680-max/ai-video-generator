@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { pickVoice } from "@/lib/voices";
+import { pickVoice, voicesFor } from "@/lib/voices";
+import { AI_VOICES, DEFAULT_AI_VOICE } from "@/lib/tts-voices";
+import { fetchNarration, newAudioContext } from "@/lib/narration-client";
 import { uploadToCloudinary } from "@/lib/cloudinary-client";
 
 type Mode = "talk" | "song";
 type Ratio = "wide" | "tall";
+type Mouth = { x: number; y: number }; // position on the photo, 0..1
 
 const SIZES: Record<Ratio, { w: number; h: number }> = {
   wide: { w: 1280, h: 720 },
@@ -38,6 +41,13 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
   return lines;
 }
 
+function imageRect(img: HTMLImageElement, W: number, H: number, zoom: number) {
+  const scale = Math.max(W / img.naturalWidth, H / img.naturalHeight) * zoom;
+  const dw = img.naturalWidth * scale;
+  const dh = img.naturalHeight * scale;
+  return { dx: (W - dw) / 2, dy: (H - dh) / 2, dw, dh };
+}
+
 function drawScene(
   ctx: CanvasRenderingContext2D,
   W: number,
@@ -45,22 +55,51 @@ function drawScene(
   img: HTMLImageElement | null,
   text: string,
   progress: number,
-  speaking: boolean,
+  amp: number, // 0..1 loudness of the voice right now
+  mouth: Mouth | null,
   mode: Mode,
-  t: number
+  t: number,
+  showMarker: boolean
 ) {
   ctx.fillStyle = "#0b1218";
   ctx.fillRect(0, 0, W, H);
 
   if (img && img.complete && img.naturalWidth) {
-    // Gentle breathing zoom, with a small bob while "speaking".
-    const breathe = 1.05 + 0.012 * Math.sin(t * 1.3);
-    const talk = speaking ? 0.008 * Math.abs(Math.sin(t * 7.5)) : 0;
-    const scale = Math.max(W / img.naturalWidth, H / img.naturalHeight) * (breathe + talk);
-    const dw = img.naturalWidth * scale;
-    const dh = img.naturalHeight * scale;
-    const bob = speaking ? 4 * Math.sin(t * 7.5) : 0;
-    ctx.drawImage(img, (W - dw) / 2, (H - dh) / 2 + bob, dw, dh);
+    // Gentle breathing zoom, plus a small bob that follows the loudness of the voice.
+    const zoom = 1.05 + 0.012 * Math.sin(t * 1.3) + 0.006 * amp;
+    const { dx, dy: dy0, dw, dh } = imageRect(img, W, H, zoom);
+    const dy = dy0 + 3 * amp * Math.sin(t * 7.5);
+    ctx.drawImage(img, dx, dy, dw, dh);
+
+    // Mouth movement: the lower face is lowered a little with the voice (amplitude driven).
+    if (mouth && amp > 0.04) {
+      const cx = dx + mouth.x * dw;
+      const cy = dy + mouth.y * dh;
+      const shift = Math.min(amp, 1) * dh * 0.02;
+      const jawW = dw * 0.13;
+      const jawH = dh * 0.16;
+      ctx.save();
+      ctx.beginPath();
+      ctx.ellipse(cx, cy + jawH * 0.55, jawW, jawH, 0, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.fillStyle = "#1d0a0c"; // inside of the mouth
+      ctx.beginPath();
+      ctx.ellipse(cx, cy + shift * 0.5, dw * 0.045, Math.max(1, shift * 0.6), 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.rect(0, cy + shift, W, H);
+      ctx.clip();
+      ctx.drawImage(img, dx, dy + shift, dw, dh);
+      ctx.restore();
+    }
+
+    if (mouth && showMarker) {
+      ctx.strokeStyle = "rgba(201,164,90,0.95)";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(dx + mouth.x * dw, dy + mouth.y * dh, 16, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
 
   if (mode === "song") {
@@ -109,6 +148,8 @@ export default function TalkPhoto() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const cancelRef = useRef<(() => void) | null>(null);
+  const busyRef = useRef(false);
+  const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
 
   const [hasPhoto, setHasPhoto] = useState(false);
   const [consent, setConsent] = useState(false);
@@ -116,12 +157,20 @@ export default function TalkPhoto() {
   const [mode, setMode] = useState<Mode>("talk");
   const [lang, setLang] = useState<"sw" | "en">("sw");
   const [ratio, setRatio] = useState<Ratio>("wide");
+  const [mouth, setMouth] = useState<Mouth | null>(null);
+
+  const [voiceMode, setVoiceMode] = useState<"ai" | "device">("ai");
+  const [aiVoice, setAiVoice] = useState(DEFAULT_AI_VOICE);
+  const [style, setStyle] = useState("");
+  const [deviceVoices, setDeviceVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [deviceVoice, setDeviceVoice] = useState("");
   const [rate, setRate] = useState(0.95);
   const [pitch, setPitch] = useState(1);
+
+  const [prep, setPrep] = useState("");
   const [playing, setPlaying] = useState(false);
   const [recording, setRecording] = useState(false);
   const [msg, setMsg] = useState("");
-  const [voiceName, setVoiceName] = useState<string | null>(null);
 
   const [lastBlob, setLastBlob] = useState<Blob | null>(null);
   const [lastName, setLastName] = useState("picha-inayoongea.webm");
@@ -130,13 +179,15 @@ export default function TalkPhoto() {
   const [shareUrl, setShareUrl] = useState<string | null>(null);
 
   const size = SIZES[ratio];
-  const canRun = consent && hasPhoto && script.trim().length > 0;
+  const canRun = consent && hasPhoto && script.trim().length > 0 && prep === "";
 
-  // Device voices (the list often fills late, so we listen for changes).
   useEffect(() => {
     const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
     if (!synth) return;
-    const load = () => setVoiceName(pickVoice(synth.getVoices(), lang)?.name ?? null);
+    const load = () => {
+      voicesRef.current = synth.getVoices();
+      setDeviceVoices(voicesFor(voicesRef.current, lang));
+    };
     load();
     synth.addEventListener("voiceschanged", load);
     return () => synth.removeEventListener("voiceschanged", load);
@@ -148,8 +199,8 @@ export default function TalkPhoto() {
     const ctx = canvasRef.current?.getContext("2d");
     if (!ctx) return;
     const first = toSegments(script, mode)[0] ?? "";
-    drawScene(ctx, size.w, size.h, imgRef.current, first, 0, false, mode, 0);
-  }, [hasPhoto, ratio, script, mode, playing, size.w, size.h]);
+    drawScene(ctx, size.w, size.h, imgRef.current, first, 0, 0, mouth, mode, 0, true);
+  }, [hasPhoto, ratio, script, mode, mouth, playing, size.w, size.h]);
 
   useEffect(() => () => cancelRef.current?.(), []);
 
@@ -165,6 +216,7 @@ export default function TalkPhoto() {
       return;
     }
     setMsg("");
+    setMouth(null);
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
@@ -174,42 +226,78 @@ export default function TalkPhoto() {
     img.src = url;
   }
 
+  // Click on the photo to mark where the mouth is.
+  function onCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
+    const canvas = canvasRef.current;
+    const img = imgRef.current;
+    if (!canvas || !img || playing) return;
+    const r = canvas.getBoundingClientRect();
+    const cx = ((e.clientX - r.left) / r.width) * size.w;
+    const cy = ((e.clientY - r.top) / r.height) * size.h;
+    const { dx, dy, dw, dh } = imageRect(img, size.w, size.h, 1.05);
+    setMouth({ x: (cx - dx) / dw, y: (cy - dy) / dh });
+  }
+
   function stop() {
     cancelRef.current?.();
   }
 
-  function start(record: boolean) {
+  async function start(record: boolean) {
     const canvas = canvasRef.current;
     const img = imgRef.current;
-    if (!canvas || !img || !canRun) return;
+    if (!canvas || !img || !canRun || busyRef.current) return;
     const segments = toSegments(script, mode);
     if (!segments.length) {
       setMsg("Andika maneno kwanza.");
       return;
     }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    if (record && typeof MediaRecorder === "undefined") {
+      setMsg("Kivinjari hiki hakiwezi kurekodi. Tumia Chrome au Edge kwenye kompyuta.");
+      return;
+    }
+    busyRef.current = true;
     stop();
     setMsg("");
     setShareUrl(null);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
 
-    const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
-    const voice = synth ? pickVoice(synth.getVoices(), lang) : null;
-    const canSpeak = !!synth && (lang !== "sw" || !!voice);
-    if (!canSpeak) setMsg("Kifaa chako hakina sauti ya Kiswahili; maneno yataonekana bila sauti. Jaribu Microsoft Edge.");
+    // 1. AI narration of the WHOLE script (so it can be heard and recorded).
+    let actx: AudioContext | null = null;
+    let buf: AudioBuffer | null = null;
+    if (voiceMode === "ai") {
+      try {
+        actx = newAudioContext();
+        await actx.resume();
+        setPrep("Inaandaa sauti ya AI…");
+        const styleText = style.trim() || (mode === "song" ? "in a melodic, rhythmic, sing-song way" : "");
+        buf = await fetchNarration(actx, segments.join("\n").slice(0, 1800), aiVoice, styleText);
+      } catch (e) {
+        setMsg(`${(e as Error).message} Inatumika sauti ya kifaa badala yake (haiingii kwenye faili la video).`);
+        actx?.close().catch(() => {});
+        actx = null;
+        buf = null;
+      }
+      setPrep("");
+    }
+    const ai = !!actx && !!buf;
 
+    // 2. Recorder (video + voice).
     let completed = false;
     let recorder: MediaRecorder | null = null;
     const chunks: Blob[] = [];
+    const dest = ai && actx ? actx.createMediaStreamDestination() : null;
     if (record) {
-      if (typeof MediaRecorder === "undefined") {
-        setMsg("Kivinjari hiki hakiwezi kurekodi. Tumia Chrome au Edge kwenye kompyuta.");
-        return;
-      }
-      const mime = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"].find((t) =>
-        MediaRecorder.isTypeSupported(t)
-      );
-      recorder = new MediaRecorder(canvas.captureStream(30), { mimeType: mime, videoBitsPerSecond: 5_000_000 });
+      const tracks = [...canvas.captureStream(30).getVideoTracks(), ...(dest ? dest.stream.getAudioTracks() : [])];
+      const candidates = dest
+        ? ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
+        : ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"];
+      const mime = candidates.find((t) => MediaRecorder.isTypeSupported(t));
+      recorder = new MediaRecorder(new MediaStream(tracks), {
+        mimeType: mime,
+        videoBitsPerSecond: 5_000_000,
+        audioBitsPerSecond: 128_000,
+      });
       recorder.ondataavailable = (e) => {
         if (e.data.size) chunks.push(e.data);
       };
@@ -227,26 +315,108 @@ export default function TalkPhoto() {
         setLastBlob(blob);
         setLastName(filename);
       };
+      if (!dest) setMsg((m) => m || "Rekodi hii haitakuwa na sauti (sauti ya AI haikupatikana).");
     }
 
-    const run = { seg: 0, segStart: performance.now(), segDur: 1, speaking: false };
-    const t0 = performance.now();
+    // 3. Shared state for the animation loop.
     const timers: number[] = [];
     let raf = 0;
     let finished = false;
+    const t0 = performance.now();
+    let src: AudioBufferSourceNode | null = null;
+    let analyser: AnalyserNode | null = null;
+    const levels = new Uint8Array(512);
+    let amp = 0;
 
     const finish = () => {
       if (finished) return;
       finished = true;
       cancelAnimationFrame(raf);
       timers.forEach((id) => window.clearTimeout(id));
-      synth?.cancel();
+      try {
+        src?.stop();
+      } catch {
+        /* already stopped */
+      }
+      window.speechSynthesis?.cancel();
       const r = recorder;
       if (r && r.state !== "inactive") window.setTimeout(() => r.stop(), 300);
+      const ac = actx;
+      if (ac) window.setTimeout(() => ac.close().catch(() => {}), 600);
       setPlaying(false);
       setRecording(false);
       cancelRef.current = null;
+      busyRef.current = false;
     };
+
+    cancelRef.current = finish;
+    setPlaying(true);
+    setRecording(record);
+    if (recorder) recorder.start(250);
+
+    if (ai && actx && buf) {
+      // ---- AI voice: everything follows the audio clock and the real loudness ----
+      const D = buf.duration;
+      const weights = segments.map((s) => s.length + 1);
+      const sum = weights.reduce((a, b) => a + b, 0);
+      const bounds: number[] = [];
+      let acc = 0;
+      for (const w of weights) {
+        bounds.push((acc / sum) * D);
+        acc += w;
+      }
+      bounds.push(D);
+
+      analyser = actx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.connect(actx.destination);
+      if (dest) analyser.connect(dest);
+      src = actx.createBufferSource();
+      src.buffer = buf;
+      src.connect(analyser);
+      const audioStart = actx.currentTime + 0.35;
+      src.start(audioStart);
+
+      const tick = () => {
+        const now = (performance.now() - t0) / 1000;
+        const el = actx!.currentTime - audioStart;
+        if (el > D + 0.8) {
+          completed = true;
+          finish();
+          return;
+        }
+        const e = Math.min(Math.max(el, 0), D - 0.001);
+        let seg = 0;
+        while (seg < segments.length - 1 && e >= bounds[seg + 1]) seg++;
+        const p = Math.min(1, Math.max(0, (e - bounds[seg]) / Math.max(0.1, bounds[seg + 1] - bounds[seg])));
+
+        analyser!.getByteTimeDomainData(levels);
+        let s2 = 0;
+        for (let i = 0; i < levels.length; i++) {
+          const v = (levels[i] - 128) / 128;
+          s2 += v * v;
+        }
+        const rms = Math.sqrt(s2 / levels.length);
+        amp = amp * 0.5 + Math.min(1, rms * 5) * 0.5;
+
+        drawScene(ctx, size.w, size.h, img, segments[seg], p, el >= 0 && el <= D ? amp : 0, mouth, mode, now, false);
+        raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+      return;
+    }
+
+    // ---- Device voice (no recording of the sound) ----
+    const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
+    const voice = synth
+      ? pickVoice(voicesRef.current.length ? voicesRef.current : synth.getVoices(), lang, deviceVoice)
+      : null;
+    const canSpeak = !!synth && (lang !== "sw" || !!voice);
+    if (!canSpeak) {
+      setMsg("Kifaa chako hakina sauti ya Kiswahili. Chagua 'Sauti ya AI' ili kupata sauti ya kike au ya kiume.");
+    }
+
+    const run = { seg: 0, segStart: performance.now(), segDur: 1, speaking: false };
 
     const advance = (i: number) => {
       if (finished) return;
@@ -297,14 +467,11 @@ export default function TalkPhoto() {
     const tick = () => {
       const now = performance.now();
       const p = Math.min(1, (now - run.segStart) / 1000 / run.segDur);
-      drawScene(ctx, size.w, size.h, img, segments[Math.min(run.seg, segments.length - 1)], p, run.speaking, mode, (now - t0) / 1000);
+      const fakeAmp = run.speaking ? 0.3 + 0.3 * Math.abs(Math.sin(((now - t0) / 1000) * 9)) : 0;
+      drawScene(ctx, size.w, size.h, img, segments[Math.min(run.seg, segments.length - 1)], p, fakeAmp, mouth, mode, (now - t0) / 1000, false);
       raf = requestAnimationFrame(tick);
     };
 
-    cancelRef.current = finish;
-    setPlaying(true);
-    setRecording(record);
-    if (recorder) recorder.start(250);
     advance(0);
     raf = requestAnimationFrame(tick);
   }
@@ -339,28 +506,66 @@ export default function TalkPhoto() {
         <textarea
           id="script"
           rows={8}
+          maxLength={1800}
           value={script}
           onChange={(e) => setScript(e.target.value)}
           placeholder={mode === "song" ? "Mstari wa kwanza\nMstari wa pili" : "Habari! Karibu kwenye kijiji chetu cha pwani."}
         />
 
-        <label htmlFor="lang">Lugha ya sauti</label>
+        <label htmlFor="lang">Lugha</label>
         <select id="lang" value={lang} onChange={(e) => setLang(e.target.value as "sw" | "en")}>
           <option value="sw">Kiswahili</option>
           <option value="en">English</option>
         </select>
+
+        <label htmlFor="vmode">Sauti</label>
+        <select id="vmode" value={voiceMode} onChange={(e) => setVoiceMode(e.target.value as "ai" | "device")}>
+          <option value="ai">Sauti ya AI (kike au kiume, inaingia kwenye video)</option>
+          <option value="device">Sauti ya kifaa (haiingii kwenye video)</option>
+        </select>
+
+        {voiceMode === "ai" ? (
+          <>
+            <select aria-label="Chagua sauti ya AI" value={aiVoice} onChange={(e) => setAiVoice(e.target.value)} style={{ marginTop: 8 }}>
+              <optgroup label="Kike">
+                {AI_VOICES.filter((v) => v.gender === "f").map((v) => (
+                  <option key={v.id} value={v.id}>{v.label}</option>
+                ))}
+              </optgroup>
+              <optgroup label="Kiume">
+                {AI_VOICES.filter((v) => v.gender === "m").map((v) => (
+                  <option key={v.id} value={v.id}>{v.label}</option>
+                ))}
+              </optgroup>
+            </select>
+            <label htmlFor="style">Mtindo wa sauti (hiari, kwa Kiingereza)</label>
+            <input
+              id="style"
+              value={style}
+              onChange={(e) => setStyle(e.target.value)}
+              placeholder={mode === "song" ? "in a melodic, rhythmic, sing-song way" : "warmly and slowly"}
+            />
+          </>
+        ) : (
+          <>
+            <select aria-label="Chagua sauti ya kifaa" value={deviceVoice} onChange={(e) => setDeviceVoice(e.target.value)} style={{ marginTop: 8 }}>
+              <option value="">Chagua yenyewe</option>
+              {deviceVoices.map((v) => (
+                <option key={v.name} value={v.name}>{v.name} ({v.lang})</option>
+              ))}
+            </select>
+            <label htmlFor="rate">Kasi: {rate.toFixed(2)}</label>
+            <input id="rate" type="range" min={0.6} max={1.3} step={0.05} value={rate} onChange={(e) => setRate(Number(e.target.value))} />
+            <label htmlFor="pitch">Mwinuko: {pitch.toFixed(2)}</label>
+            <input id="pitch" type="range" min={0.5} max={1.5} step={0.05} value={pitch} onChange={(e) => setPitch(Number(e.target.value))} />
+          </>
+        )}
 
         <label htmlFor="ratio">Muundo</label>
         <select id="ratio" value={ratio} onChange={(e) => setRatio(e.target.value as Ratio)}>
           <option value="wide">Mlalo (YouTube)</option>
           <option value="tall">Wima (WhatsApp Status, TikTok)</option>
         </select>
-
-        <label htmlFor="rate">Kasi ya sauti: {rate.toFixed(2)}</label>
-        <input id="rate" type="range" min={0.6} max={1.3} step={0.05} value={rate} onChange={(e) => setRate(Number(e.target.value))} />
-
-        <label htmlFor="pitch">Mwinuko wa sauti: {pitch.toFixed(2)}</label>
-        <input id="pitch" type="range" min={0.5} max={1.5} step={0.05} value={pitch} onChange={(e) => setPitch(Number(e.target.value))} />
 
         <label className="check">
           <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
@@ -375,8 +580,17 @@ export default function TalkPhoto() {
           ref={canvasRef}
           width={size.w}
           height={size.h}
-          style={{ width: "100%", maxWidth: ratio === "tall" ? 360 : 760 }}
+          onClick={onCanvasClick}
+          style={{ width: "100%", maxWidth: ratio === "tall" ? 360 : 760, cursor: hasPhoto && !playing ? "crosshair" : "default" }}
         />
+        {hasPhoto && !playing && (
+          <p className="muted" style={{ marginTop: 8 }}>
+            {mouth
+              ? "Mdomo umewekwa (duara la dhahabu). Bonyeza mahali pengine kwenye picha ukitaka kubadilisha."
+              : "Bonyeza kwenye mdomo wa picha ili mdomo usogee na sauti."}
+          </p>
+        )}
+
         <div className="controls" style={{ marginTop: 12 }}>
           {!playing ? (
             <>
@@ -388,6 +602,7 @@ export default function TalkPhoto() {
           )}
         </div>
 
+        {prep && <p className="muted">{prep}</p>}
         {recording && <p className="muted">Inarekodi… acha ukurasa wazi hadi imalize.</p>}
         {msg && <p className="msg">{msg}</p>}
         {!consent && hasPhoto && <p className="muted">Thibitisha ruhusa ya picha ili kuendelea.</p>}
@@ -407,8 +622,8 @@ export default function TalkPhoto() {
         )}
 
         <p className="muted" style={{ marginTop: 14 }}>
-          {voiceName ? `Sauti: ${voiceName}. ` : lang === "sw" ? "Hakuna sauti ya Kiswahili kwenye kifaa hiki (jaribu Microsoft Edge). " : ""}
-          Picha inabaki kwenye kifaa chako. Faili la kupakua halina sauti (sauti inasikika wakati wa kucheza tu).
+          Maneno yanasomwa na sauti ya AI, na harakati ya mdomo inafuata kelele ya sauti kwa wakati halisi. Hii ni
+          mfano wa harakati, si lip-sync halisi. Picha inabaki kwenye kifaa chako.
         </p>
       </div>
     </div>
