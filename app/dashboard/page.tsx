@@ -41,6 +41,9 @@ export default async function Dashboard() {
       <main className="wrap dash">
         <section>
           <h2>Miradi yako</h2>
+          <p style={{ margin: "0 0 18px" }}>
+            <Link href="/talk">Picha ya kuongea au wimbo wa maneno →</Link>
+          </p>
           {projects?.length ? (
             <ul className="projects">
               {projects.map((p) => (
