@@ -29,12 +29,16 @@ class ApiError extends Error {
   }
 }
 
-const RETRYABLE = new Set([429, 500, 502, 503, 504]);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Retries temporary provider errors (overload / rate limit) a few times.
-// Stops early so the request still finishes inside Vercel's time limit.
-async function withRetry<T>(fn: (attempt: number) => Promise<T>, tries = 3, budgetMs = 40000): Promise<T> {
+// Runs fn(attempt) up to `tries` times. Retries only temporary errors (overload, rate limit,
+// timeout, model not available). Stops early so the request still finishes inside Vercel's limit.
+async function withRetry<T>(
+  fn: (attempt: number) => Promise<T>,
+  retryable: Set<number>,
+  tries = 3,
+  budgetMs = 38000
+): Promise<T> {
   const start = Date.now();
   let last: unknown;
   for (let i = 0; i < tries; i++) {
@@ -42,9 +46,10 @@ async function withRetry<T>(fn: (attempt: number) => Promise<T>, tries = 3, budg
       return await fn(i);
     } catch (e) {
       last = e;
-      const retryable = e instanceof ApiError && RETRYABLE.has(e.status);
-      const delay = 2500 * (i + 1);
-      if (!retryable || i === tries - 1 || Date.now() - start + delay > budgetMs) break;
+      const temporary =
+        (e instanceof ApiError && retryable.has(e.status)) || (e instanceof Error && e.name === "TimeoutError");
+      const delay = 1500 * (i + 1);
+      if (!temporary || i === tries - 1 || Date.now() - start + delay > budgetMs) break;
       await sleep(delay);
     }
   }
@@ -95,9 +100,10 @@ async function geminiCall(input: Input, apiKey: string, model: string): Promise<
       contents: [{ role: "user", parts: [{ text: userPrompt(input) }] }],
       generationConfig: { responseMimeType: "application/json", maxOutputTokens: 8192, temperature: 0.8 },
     }),
+    signal: AbortSignal.timeout(30000),
   });
   if (!res.ok) {
-    throw new ApiError(`Gemini API ${res.status}: ${(await res.text()).slice(0, 300)}`, res.status);
+    throw new ApiError(`Gemini API (${model}) ${res.status}: ${(await res.text()).slice(0, 300)}`, res.status);
   }
 
   const json = await res.json();
@@ -106,36 +112,47 @@ async function geminiCall(input: Input, apiKey: string, model: string): Promise<
 }
 
 async function viaGemini(input: Input, apiKey: string): Promise<Plan> {
-  const primary = env("GEMINI_MODEL") ?? "gemini-3.8-flash";
-  const fallback = env("GEMINI_FALLBACK_MODEL"); // optional second model if the first is overloaded
-  return withRetry((attempt) => geminiCall(input, apiKey, attempt > 0 && fallback ? fallback : primary));
+  // Each retry uses the next model in this list, so one overloaded model does not block us.
+  const chain = Array.from(
+    new Set(
+      [env("GEMINI_MODEL") ?? "gemini-3.8-flash", env("GEMINI_FALLBACK_MODEL") ?? "gemini-3.6-flash", "gemini-3.5-flash-lite"].filter(
+        (m): m is string => !!m
+      )
+    )
+  );
+  // 404 (model not available to this account) also moves on to the next model.
+  return withRetry((attempt) => geminiCall(input, apiKey, chain[Math.min(attempt, chain.length - 1)]), new Set([404, 429, 500, 502, 503, 504]));
 }
 
 // --- Claude ---
 async function viaClaude(input: Input, apiKey: string): Promise<Plan> {
-  return withRetry(async () => {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: env("ANTHROPIC_MODEL") ?? "claude-sonnet-5-5",
-        max_tokens: 8000,
-        system: SYSTEM,
-        messages: [{ role: "user", content: userPrompt(input) }],
-      }),
-    });
-    if (!res.ok) {
-      throw new ApiError(`Claude API ${res.status}: ${(await res.text()).slice(0, 300)}`, res.status);
-    }
+  return withRetry(
+    async () => {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: env("ANTHROPIC_MODEL") ?? "claude-sonnet-5-5",
+          max_tokens: 8000,
+          system: SYSTEM,
+          messages: [{ role: "user", content: userPrompt(input) }],
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!res.ok) {
+        throw new ApiError(`Claude API ${res.status}: ${(await res.text()).slice(0, 300)}`, res.status);
+      }
 
-    const json = await res.json();
-    const text: string = (json.content ?? []).map((b: { text?: string }) => b.text ?? "").join("");
-    return parse(text);
-  });
+      const json = await res.json();
+      const text: string = (json.content ?? []).map((b: { text?: string }) => b.text ?? "").join("");
+      return parse(text);
+    },
+    new Set([429, 500, 502, 503, 504, 529])
+  );
 }
 
 // --- Demo (no API key, no cost) ---
