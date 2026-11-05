@@ -24,8 +24,8 @@ export default async function TalkPage() {
       <main className="wrap">
         <h1>Picha ya kuongea au wimbo wa maneno</h1>
         <p className="muted" style={{ maxWidth: "68ch", margin: "8px 0 28px" }}>
-          Pakia picha, andika maneno, na picha itasoma maneno yako kwa sauti ya kifaa chako. Hii inasogeza picha na kuonyesha
-          maneno kama karaoke; si lip-sync halisi wala kuimba halisi, ambavyo vinahitaji huduma ya AI ya kulipia.
+          Pakia picha, andika maneno, chagua sauti ya kike au ya kiume, na picha itasoma maneno yako. Bonyeza kwenye mdomo
+          wa picha ili usogee na sauti. Video unayopakua ina sauti.
         </p>
         <TalkPhoto />
       </main>
