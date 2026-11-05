@@ -9,9 +9,21 @@ export async function signedUrl(bucket: string, path: string | null | undefined,
   return data?.signedUrl ?? null;
 }
 
-// Downloads a remote file and stores it in Supabase Storage.
-// Tries twice with a timeout, because free image services can be slow or rate-limited.
+// Stores a file in Supabase Storage from either a normal URL or a base64 data: URL.
+// Normal URLs are tried twice with a timeout, because remote services can be slow.
 export async function storeFromUrl(bucket: string, path: string, sourceUrl: string) {
+  if (sourceUrl.startsWith("data:")) {
+    const match = sourceUrl.match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/);
+    if (!match) throw new Error("Invalid data URL");
+    const bytes = Buffer.from(match[3], match[2] ? "base64" : "utf8");
+    if (bytes.length < 1000) throw new Error("Generated file is empty");
+    const { error } = await adminClient()
+      .storage.from(bucket)
+      .upload(path, bytes, { contentType: match[1] ?? "image/jpeg", upsert: true });
+    if (error) throw error;
+    return path;
+  }
+
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
