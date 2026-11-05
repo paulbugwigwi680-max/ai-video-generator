@@ -32,6 +32,26 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
   return lines;
 }
 
+// Picks the best device voice for the project language (Swahili or English).
+function pickVoice(voices: SpeechSynthesisVoice[], language: string): SpeechSynthesisVoice | null {
+  const norm = (v: SpeechSynthesisVoice) => v.lang.toLowerCase().replace("_", "-");
+  const natural = (v: SpeechSynthesisVoice) => /natural|online/i.test(v.name);
+
+  if (language === "sw") {
+    const byLang = voices.filter((v) => norm(v).startsWith("sw"));
+    const pool = byLang.length ? byLang : voices.filter((v) => /swahili|kiswahili/i.test(v.name));
+    return (
+      pool.find((v) => natural(v) && norm(v) === "sw-tz") ??
+      pool.find(natural) ??
+      pool.find((v) => norm(v) === "sw-tz") ??
+      pool[0] ??
+      null
+    );
+  }
+  const pool = voices.filter((v) => norm(v).startsWith("en"));
+  return pool.find(natural) ?? pool[0] ?? null;
+}
+
 // Draws one frame of the documentary at time t (seconds). Returns the index of the active clip.
 function drawFrame(
   ctx: CanvasRenderingContext2D,
@@ -112,9 +132,12 @@ export default function Documentary({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mediaRef = useRef<Media[]>([]);
   const cancelRef = useRef<(() => void) | null>(null);
+  const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const [playing, setPlaying] = useState(false);
   const [recording, setRecording] = useState(false);
   const [msg, setMsg] = useState("");
+  const [voiceName, setVoiceName] = useState<string | null>(null);
+  const [voicesChecked, setVoicesChecked] = useState(false);
 
   const starts = useMemo(() => {
     let acc = 0;
@@ -125,6 +148,23 @@ export default function Documentary({
     });
   }, [clips]);
   const total = useMemo(() => clips.reduce((a, c) => a + c.duration, 0), [clips]);
+
+  // Load device voices. Browsers often fill this list late, so we also listen for changes.
+  useEffect(() => {
+    const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
+    if (!synth) {
+      setVoicesChecked(true);
+      return;
+    }
+    const load = () => {
+      voicesRef.current = synth.getVoices();
+      setVoiceName(pickVoice(voicesRef.current, language)?.name ?? null);
+      setVoicesChecked(true);
+    };
+    load();
+    synth.addEventListener("voiceschanged", load);
+    return () => synth.removeEventListener("voiceschanged", load);
+  }, [language]);
 
   // Preload every picture / clip (crossOrigin keeps the canvas recordable).
   useEffect(() => {
@@ -202,14 +242,10 @@ export default function Documentary({
 
     // Narration with the device voice (not captured in the recording).
     const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
-    let voice: SpeechSynthesisVoice | null = null;
     const wantSpeech = !record && !!synth;
-    if (wantSpeech) {
-      const prefix = language === "sw" ? "sw" : "en";
-      voice = synth!.getVoices().find((v) => v.lang.toLowerCase().startsWith(prefix)) ?? null;
-      if (language === "sw" && !voice) {
-        setMsg("Kifaa chako hakina sauti ya Kiswahili, kwa hiyo simulizi inaonyeshwa kama maandishi tu.");
-      }
+    const voice = wantSpeech ? pickVoice(voicesRef.current.length ? voicesRef.current : synth!.getVoices(), language) : null;
+    if (wantSpeech && language === "sw" && !voice) {
+      setMsg("Kifaa chako hakina sauti ya Kiswahili, kwa hiyo simulizi inaonyeshwa kama maandishi tu.");
     }
     const speak = (text: string) => {
       if (!wantSpeech || !text || (language === "sw" && !voice)) return;
@@ -282,10 +318,22 @@ export default function Documentary({
           <button onClick={stop}>■ Simama</button>
         )}
       </div>
+
       {recording && (
         <p className="muted">Inarekodi… acha ukurasa huu wazi na usibadilishe tab hadi imalize ({Math.round(total)}s).</p>
       )}
       {msg && <p className="msg">{msg}</p>}
+
+      {voicesChecked && (
+        <p className="muted">
+          {voiceName
+            ? `Sauti ya simulizi: ${voiceName}`
+            : language === "sw"
+              ? "Hakuna sauti ya Kiswahili kwenye kifaa hiki. Jaribu Microsoft Edge kwenye kompyuta, au angalia mipangilio ya Text-to-speech ya simu yako."
+              : "Hakuna sauti ya Kiingereza iliyopatikana kwenye kifaa hiki."}
+        </p>
+      )}
+
       <p className="muted">
         Picha zinasogea polepole kama documentary ya picha; video za AI zikiwepo zinachezwa kama zilivyo. Sauti ya
         msimulizi inasikika wakati wa kucheza tu (kwa kutumia sauti ya kifaa chako). Faili la kupakua halina sauti.
