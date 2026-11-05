@@ -52,6 +52,39 @@ function pickVoice(voices: SpeechSynthesisVoice[], language: string): SpeechSynt
   return pool.find(natural) ?? pool[0] ?? null;
 }
 
+// Uploads the recorded video straight from the browser to Cloudinary (unsigned preset).
+function uploadToCloudinary(blob: Blob, filename: string, onProgress: (pct: number) => void): Promise<string> {
+  const cloud = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
+  const preset = process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET;
+  return new Promise((resolve, reject) => {
+    if (!cloud || !preset) {
+      reject(new Error("Cloudinary haijawekwa."));
+      return;
+    }
+    const form = new FormData();
+    form.append("file", blob, filename);
+    form.append("upload_preset", preset);
+    form.append("tags", "bugwigwi");
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `https://api.cloudinary.com/v1_1/${cloud}/video/upload`);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      try {
+        const json = JSON.parse(xhr.responseText);
+        if (xhr.status >= 200 && xhr.status < 300 && json.secure_url) resolve(json.secure_url as string);
+        else reject(new Error(json?.error?.message ?? `Upload imeshindwa (${xhr.status})`));
+      } catch {
+        reject(new Error("Jibu lisilotarajiwa kutoka Cloudinary."));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Hitilafu ya mtandao."));
+    xhr.send(form);
+  });
+}
+
 // Draws one frame of the documentary at time t (seconds). Returns the index of the active clip.
 function drawFrame(
   ctx: CanvasRenderingContext2D,
@@ -124,10 +157,14 @@ export default function Documentary({
   clips,
   title,
   language,
+  projectId,
+  finalUrl,
 }: {
   clips: Clip[];
   title: string;
   language: string;
+  projectId: string;
+  finalUrl: string | null;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mediaRef = useRef<Media[]>([]);
@@ -138,6 +175,15 @@ export default function Documentary({
   const [msg, setMsg] = useState("");
   const [voiceName, setVoiceName] = useState<string | null>(null);
   const [voicesChecked, setVoicesChecked] = useState(false);
+
+  // Sharing (Cloudinary)
+  const [lastBlob, setLastBlob] = useState<Blob | null>(null);
+  const [lastName, setLastName] = useState("documentary.webm");
+  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [shareUrl, setShareUrl] = useState<string | null>(finalUrl);
+  const [shareMsg, setShareMsg] = useState("");
+  const [copied, setCopied] = useState(false);
 
   const starts = useMemo(() => {
     let acc = 0;
@@ -202,6 +248,41 @@ export default function Documentary({
     cancelRef.current?.();
   }
 
+  async function share() {
+    if (!lastBlob || uploading) return;
+    setUploading(true);
+    setProgress(0);
+    setShareMsg("");
+    try {
+      const url = await uploadToCloudinary(lastBlob, lastName, setProgress);
+      const res = await fetch(`/api/projects/${projectId}/final`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error ?? "Imeshindwa kuhifadhi link.");
+      }
+      setShareUrl(url);
+      setLastBlob(null);
+    } catch (e) {
+      setShareMsg((e as Error).message);
+    }
+    setUploading(false);
+  }
+
+  async function copyLink() {
+    if (!shareUrl) return;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setShareMsg("Nakili link kwa mkono kutoka kwenye kisanduku.");
+    }
+  }
+
   function start(record: boolean) {
     const canvas = canvasRef.current;
     if (!canvas || !clips.length) return;
@@ -232,11 +313,15 @@ export default function Documentary({
         const blob = new Blob(chunks, { type });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
-        const name = title.replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 50) || "documentary";
+        const base = title.replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 50) || "documentary";
+        const filename = `${base}.${type.includes("mp4") ? "mp4" : "webm"}`;
         a.href = url;
-        a.download = `${name}.${type.includes("mp4") ? "mp4" : "webm"}`;
+        a.download = filename;
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 10000);
+        setLastBlob(blob);
+        setLastName(filename);
+        setShareMsg("");
       };
     }
 
@@ -323,6 +408,27 @@ export default function Documentary({
         <p className="muted">Inarekodi… acha ukurasa huu wazi na usibadilishe tab hadi imalize ({Math.round(total)}s).</p>
       )}
       {msg && <p className="msg">{msg}</p>}
+
+      {lastBlob && !playing && (
+        <div className="share">
+          <p className="info">Video yako imerekodiwa na kupakuliwa.</p>
+          <button onClick={share} disabled={uploading}>
+            {uploading ? `Inapakia… ${progress}%` : "☁ Pata link ya kushiriki"}
+          </button>
+        </div>
+      )}
+
+      {shareUrl && (
+        <div className="share">
+          <label htmlFor="share-link">Link ya video yako</label>
+          <div className="row">
+            <input id="share-link" readOnly value={shareUrl} onFocus={(e) => e.currentTarget.select()} />
+            <button className="ghost" onClick={copyLink}>{copied ? "Imenakiliwa" : "Nakili"}</button>
+            <a href={shareUrl} target="_blank" rel="noreferrer">Fungua</a>
+          </div>
+        </div>
+      )}
+      {shareMsg && <p className="msg">{shareMsg}</p>}
 
       {voicesChecked && (
         <p className="muted">
