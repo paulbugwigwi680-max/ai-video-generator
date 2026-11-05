@@ -1,19 +1,25 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { pickVoice, voicesFor } from "@/lib/voices";
+import { AI_VOICES, DEFAULT_AI_VOICE } from "@/lib/tts-voices";
+import { fetchNarration, newAudioContext } from "@/lib/narration-client";
+import { uploadToCloudinary } from "@/lib/cloudinary-client";
 
 export type Clip = {
   kind: "video" | "image";
   src: string;
   duration: number;
   caption: string; // text shown on screen for this clip
-  speak: string; // full scene narration, read aloud at the first clip of each scene
+  speak: string; // full scene narration (set on the first clip of each scene)
+  scene: number; // scene number
 };
 
 type Media = HTMLImageElement | HTMLVideoElement;
 
 const W = 1280;
 const H = 720;
+const LEAD = 0.25; // seconds of silence before narration starts in each scene
 
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
   const words = text.split(/\s+/).filter(Boolean);
@@ -32,57 +38,31 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
   return lines;
 }
 
-// Picks the best device voice for the project language (Swahili or English).
-function pickVoice(voices: SpeechSynthesisVoice[], language: string): SpeechSynthesisVoice | null {
-  const norm = (v: SpeechSynthesisVoice) => v.lang.toLowerCase().replace("_", "-");
-  const natural = (v: SpeechSynthesisVoice) => /natural|online/i.test(v.name);
-
-  if (language === "sw") {
-    const byLang = voices.filter((v) => norm(v).startsWith("sw"));
-    const pool = byLang.length ? byLang : voices.filter((v) => /swahili|kiswahili/i.test(v.name));
-    return (
-      pool.find((v) => natural(v) && norm(v) === "sw-tz") ??
-      pool.find(natural) ??
-      pool.find((v) => norm(v) === "sw-tz") ??
-      pool[0] ??
-      null
-    );
+// Stretches each scene so the narration always fits, then computes the timeline.
+function buildPlan(clips: Clip[], audio: Map<number, AudioBuffer> | null) {
+  const out: Clip[] = [];
+  const sceneStarts = new Map<number, number>();
+  let acc = 0;
+  let i = 0;
+  while (i < clips.length) {
+    const scene = clips[i].scene;
+    const group: Clip[] = [];
+    while (i < clips.length && clips[i].scene === scene) group.push(clips[i++]);
+    const sum = group.reduce((a, c) => a + c.duration, 0);
+    const buf = audio?.get(scene);
+    const target = buf ? Math.max(sum, buf.duration + LEAD + 0.7) : sum;
+    const k = target / sum;
+    sceneStarts.set(scene, acc);
+    for (const c of group) out.push({ ...c, duration: c.duration * k });
+    acc += target;
   }
-  const pool = voices.filter((v) => norm(v).startsWith("en"));
-  return pool.find(natural) ?? pool[0] ?? null;
-}
-
-// Uploads the recorded video straight from the browser to Cloudinary (unsigned preset).
-function uploadToCloudinary(blob: Blob, filename: string, onProgress: (pct: number) => void): Promise<string> {
-  const cloud = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
-  const preset = process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET;
-  return new Promise((resolve, reject) => {
-    if (!cloud || !preset) {
-      reject(new Error("Cloudinary haijawekwa."));
-      return;
-    }
-    const form = new FormData();
-    form.append("file", blob, filename);
-    form.append("upload_preset", preset);
-    form.append("tags", "bugwigwi");
-
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", `https://api.cloudinary.com/v1_1/${cloud}/video/upload`);
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
-    };
-    xhr.onload = () => {
-      try {
-        const json = JSON.parse(xhr.responseText);
-        if (xhr.status >= 200 && xhr.status < 300 && json.secure_url) resolve(json.secure_url as string);
-        else reject(new Error(json?.error?.message ?? `Upload imeshindwa (${xhr.status})`));
-      } catch {
-        reject(new Error("Jibu lisilotarajiwa kutoka Cloudinary."));
-      }
-    };
-    xhr.onerror = () => reject(new Error("Hitilafu ya mtandao."));
-    xhr.send(form);
-  });
+  const starts: number[] = [];
+  let t = 0;
+  for (const c of out) {
+    starts.push(t);
+    t += c.duration;
+  }
+  return { clips: out, starts, total: t, sceneStarts };
 }
 
 // Draws one frame of the documentary at time t (seconds). Returns the index of the active clip.
@@ -169,12 +149,19 @@ export default function Documentary({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mediaRef = useRef<Media[]>([]);
   const cancelRef = useRef<(() => void) | null>(null);
+  const busyRef = useRef(false);
   const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
+
   const [playing, setPlaying] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [prep, setPrep] = useState("");
   const [msg, setMsg] = useState("");
-  const [voiceName, setVoiceName] = useState<string | null>(null);
-  const [voicesChecked, setVoicesChecked] = useState(false);
+
+  // Narration voice
+  const [voiceMode, setVoiceMode] = useState<"ai" | "device">("ai");
+  const [aiVoice, setAiVoice] = useState(DEFAULT_AI_VOICE);
+  const [deviceVoices, setDeviceVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [deviceVoice, setDeviceVoice] = useState("");
 
   // Sharing (Cloudinary)
   const [lastBlob, setLastBlob] = useState<Blob | null>(null);
@@ -185,27 +172,15 @@ export default function Documentary({
   const [shareMsg, setShareMsg] = useState("");
   const [copied, setCopied] = useState(false);
 
-  const starts = useMemo(() => {
-    let acc = 0;
-    return clips.map((c) => {
-      const s = acc;
-      acc += c.duration;
-      return s;
-    });
-  }, [clips]);
-  const total = useMemo(() => clips.reduce((a, c) => a + c.duration, 0), [clips]);
+  const base = useMemo(() => buildPlan(clips, null), [clips]);
 
-  // Load device voices. Browsers often fill this list late, so we also listen for changes.
+  // Device voices (the list often fills late, so we also listen for changes).
   useEffect(() => {
     const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
-    if (!synth) {
-      setVoicesChecked(true);
-      return;
-    }
+    if (!synth) return;
     const load = () => {
       voicesRef.current = synth.getVoices();
-      setVoiceName(pickVoice(voicesRef.current, language)?.name ?? null);
-      setVoicesChecked(true);
+      setDeviceVoices(voicesFor(voicesRef.current, language));
     };
     load();
     synth.addEventListener("voiceschanged", load);
@@ -233,7 +208,7 @@ export default function Documentary({
 
     const paint = () => {
       const ctx = canvasRef.current?.getContext("2d");
-      if (ctx) drawFrame(ctx, clips, starts, mediaRef.current, 0, { idx: -1 });
+      if (ctx) drawFrame(ctx, base.clips, base.starts, mediaRef.current, 0, { idx: -1 });
     };
     const first = mediaRef.current[0];
     if (first instanceof HTMLImageElement) first.onload = paint;
@@ -242,7 +217,7 @@ export default function Documentary({
     return () => {
       cancelRef.current?.();
     };
-  }, [clips, starts]);
+  }, [clips, base]);
 
   function stop() {
     cancelRef.current?.();
@@ -283,27 +258,65 @@ export default function Documentary({
     }
   }
 
-  function start(record: boolean) {
+  async function start(record: boolean) {
     const canvas = canvasRef.current;
-    if (!canvas || !clips.length) return;
-    stop();
-    setMsg("");
+    if (!canvas || !clips.length || busyRef.current) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    if (record && typeof MediaRecorder === "undefined") {
+      setMsg("Kivinjari hiki hakiwezi kurekodi. Tumia Chrome au Edge kwenye kompyuta.");
+      return;
+    }
+    busyRef.current = true;
+    stop();
+    setMsg("");
+    setShareMsg("");
 
+    // 1. Narration audio (AI voice) so it can be heard AND recorded into the file.
+    let actx: AudioContext | null = null;
+    let audio: Map<number, AudioBuffer> | null = null;
+    if (voiceMode === "ai") {
+      try {
+        actx = newAudioContext();
+        await actx.resume();
+        audio = new Map();
+        const scenes = Array.from(new Set(clips.map((c) => c.scene)));
+        let n = 0;
+        for (const sc of scenes) {
+          const text = clips.find((c) => c.scene === sc && c.speak)?.speak;
+          n++;
+          if (!text) continue;
+          setPrep(`Inaandaa sauti ya AI… ${n}/${scenes.length}`);
+          audio.set(sc, await fetchNarration(actx, text, aiVoice));
+        }
+      } catch (e) {
+        setMsg(`${(e as Error).message} Inatumika sauti ya kifaa badala yake (haiingii kwenye faili la video).`);
+        actx?.close().catch(() => {});
+        actx = null;
+        audio = null;
+      }
+      setPrep("");
+    }
+    const hasAiAudio = !!actx && !!audio && audio.size > 0;
+    const plan = buildPlan(clips, hasAiAudio ? audio : null);
+
+    // 2. Recorder (video + narration mixed together).
     let completed = false;
     let recorder: MediaRecorder | null = null;
     const chunks: Blob[] = [];
+    const dest = hasAiAudio && actx ? actx.createMediaStreamDestination() : null;
 
     if (record) {
-      if (typeof MediaRecorder === "undefined") {
-        setMsg("Kivinjari hiki hakiwezi kurekodi. Tumia Chrome au Edge kwenye kompyuta.");
-        return;
-      }
-      const mime = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"].find((t) =>
-        MediaRecorder.isTypeSupported(t)
-      );
-      recorder = new MediaRecorder(canvas.captureStream(30), { mimeType: mime, videoBitsPerSecond: 5_000_000 });
+      const tracks = [...canvas.captureStream(30).getVideoTracks(), ...(dest ? dest.stream.getAudioTracks() : [])];
+      const candidates = dest
+        ? ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
+        : ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"];
+      const mime = candidates.find((t) => MediaRecorder.isTypeSupported(t));
+      recorder = new MediaRecorder(new MediaStream(tracks), {
+        mimeType: mime,
+        videoBitsPerSecond: 5_000_000,
+        audioBitsPerSecond: 128_000,
+      });
       recorder.ondataavailable = (e) => {
         if (e.data.size) chunks.push(e.data);
       };
@@ -313,27 +326,45 @@ export default function Documentary({
         const blob = new Blob(chunks, { type });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
-        const base = title.replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 50) || "documentary";
-        const filename = `${base}.${type.includes("mp4") ? "mp4" : "webm"}`;
+        const baseName = title.replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 50) || "documentary";
+        const filename = `${baseName}.${type.includes("mp4") ? "mp4" : "webm"}`;
         a.href = url;
         a.download = filename;
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 10000);
         setLastBlob(blob);
         setLastName(filename);
-        setShareMsg("");
       };
+      if (!dest) setMsg((m) => m || "Rekodi hii haitakuwa na sauti (sauti ya AI haikupatikana).");
     }
 
-    // Narration with the device voice (not captured in the recording).
+    // 3. Schedule the narration sources against the audio clock.
+    const sources: AudioBufferSourceNode[] = [];
+    if (actx && audio && hasAiAudio) {
+      const a0 = actx.currentTime + 0.15;
+      audio.forEach((buf, scene) => {
+        const at = plan.sceneStarts.get(scene);
+        if (at === undefined) return;
+        const src = actx!.createBufferSource();
+        src.buffer = buf;
+        src.connect(actx!.destination);
+        if (dest) src.connect(dest);
+        src.start(a0 + at + LEAD);
+        sources.push(src);
+      });
+    }
+
+    // 4. Device voice (only when AI voice is not used).
     const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
-    const wantSpeech = !record && !!synth;
-    const voice = wantSpeech ? pickVoice(voicesRef.current.length ? voicesRef.current : synth!.getVoices(), language) : null;
-    if (wantSpeech && language === "sw" && !voice) {
-      setMsg("Kifaa chako hakina sauti ya Kiswahili, kwa hiyo simulizi inaonyeshwa kama maandishi tu.");
+    const useDevice = !hasAiAudio && !record && !!synth;
+    const voice = useDevice
+      ? pickVoice(voicesRef.current.length ? voicesRef.current : synth!.getVoices(), language, deviceVoice)
+      : null;
+    if (useDevice && language === "sw" && !voice) {
+      setMsg("Kifaa chako hakina sauti ya Kiswahili. Chagua 'Sauti ya AI' ili kupata sauti ya kike au ya kiume.");
     }
     const speak = (text: string) => {
-      if (!wantSpeech || !text || (language === "sw" && !voice)) return;
+      if (!useDevice || !text || (language === "sw" && !voice)) return;
       synth!.cancel();
       const u = new SpeechSynthesisUtterance(text);
       if (voice) {
@@ -345,11 +376,12 @@ export default function Documentary({
       synth!.speak(u);
     };
 
+    // 5. Animation loop.
     const state = { idx: -1 };
     let raf = 0;
     let finished = false;
     let lastIdx = -1;
-    const t0 = performance.now();
+    const t0 = performance.now() + 150;
 
     const finish = () => {
       if (finished) return;
@@ -358,26 +390,36 @@ export default function Documentary({
       mediaRef.current.forEach((m) => {
         if (m instanceof HTMLVideoElement) m.pause();
       });
+      sources.forEach((s) => {
+        try {
+          s.stop();
+        } catch {
+          /* already stopped */
+        }
+      });
       synth?.cancel();
       const r = recorder;
       if (r && r.state !== "inactive") setTimeout(() => r.stop(), 300);
+      const ac = actx;
+      if (ac) setTimeout(() => ac.close().catch(() => {}), 600);
       setPlaying(false);
       setRecording(false);
       cancelRef.current = null;
+      busyRef.current = false;
     };
 
     const tick = () => {
-      const t = (performance.now() - t0) / 1000;
-      if (t >= total) {
-        drawFrame(ctx, clips, starts, mediaRef.current, total - 0.001, state);
+      const t = Math.max(0, (performance.now() - t0) / 1000);
+      if (t >= plan.total) {
+        drawFrame(ctx, plan.clips, plan.starts, mediaRef.current, plan.total - 0.001, state);
         completed = true;
         finish();
         return;
       }
-      const i = drawFrame(ctx, clips, starts, mediaRef.current, t, state);
+      const i = drawFrame(ctx, plan.clips, plan.starts, mediaRef.current, t, state);
       if (i !== lastIdx) {
         lastIdx = i;
-        speak(clips[i].speak);
+        speak(plan.clips[i].speak);
       }
       raf = requestAnimationFrame(tick);
     };
@@ -389,23 +431,57 @@ export default function Documentary({
     raf = requestAnimationFrame(tick);
   }
 
+  const preparing = prep !== "";
+
   return (
     <section className="doc">
       <h2>Documentary yako</h2>
       <canvas ref={canvasRef} width={W} height={H} />
+
       <div className="controls">
         {!playing ? (
           <>
-            <button onClick={() => start(false)}>▶ Cheza ({Math.round(total)}s)</button>
-            <button className="ghost" onClick={() => start(true)}>⬇ Rekodi na pakua video</button>
+            <button onClick={() => start(false)} disabled={preparing}>▶ Cheza (~{Math.round(base.total)}s)</button>
+            <button className="ghost" onClick={() => start(true)} disabled={preparing}>⬇ Rekodi na pakua video</button>
           </>
         ) : (
           <button onClick={stop}>■ Simama</button>
         )}
       </div>
 
+      <div className="voice-box">
+        <label htmlFor="vmode">Sauti ya simulizi</label>
+        <select id="vmode" value={voiceMode} onChange={(e) => setVoiceMode(e.target.value as "ai" | "device")} disabled={playing}>
+          <option value="ai">Sauti ya AI (kike au kiume, inaingia kwenye video)</option>
+          <option value="device">Sauti ya kifaa (haiingii kwenye video)</option>
+        </select>
+
+        {voiceMode === "ai" ? (
+          <select aria-label="Chagua sauti ya AI" value={aiVoice} onChange={(e) => setAiVoice(e.target.value)} disabled={playing}>
+            <optgroup label="Kike">
+              {AI_VOICES.filter((v) => v.gender === "f").map((v) => (
+                <option key={v.id} value={v.id}>{v.label}</option>
+              ))}
+            </optgroup>
+            <optgroup label="Kiume">
+              {AI_VOICES.filter((v) => v.gender === "m").map((v) => (
+                <option key={v.id} value={v.id}>{v.label}</option>
+              ))}
+            </optgroup>
+          </select>
+        ) : (
+          <select aria-label="Chagua sauti ya kifaa" value={deviceVoice} onChange={(e) => setDeviceVoice(e.target.value)} disabled={playing}>
+            <option value="">Chagua yenyewe</option>
+            {deviceVoices.map((v) => (
+              <option key={v.name} value={v.name}>{v.name} ({v.lang})</option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {preparing && <p className="muted">{prep}</p>}
       {recording && (
-        <p className="muted">Inarekodi… acha ukurasa huu wazi na usibadilishe tab hadi imalize ({Math.round(total)}s).</p>
+        <p className="muted">Inarekodi… acha ukurasa huu wazi na usibadilishe tab hadi imalize.</p>
       )}
       {msg && <p className="msg">{msg}</p>}
 
@@ -430,19 +506,9 @@ export default function Documentary({
       )}
       {shareMsg && <p className="msg">{shareMsg}</p>}
 
-      {voicesChecked && (
-        <p className="muted">
-          {voiceName
-            ? `Sauti ya simulizi: ${voiceName}`
-            : language === "sw"
-              ? "Hakuna sauti ya Kiswahili kwenye kifaa hiki. Jaribu Microsoft Edge kwenye kompyuta, au angalia mipangilio ya Text-to-speech ya simu yako."
-              : "Hakuna sauti ya Kiingereza iliyopatikana kwenye kifaa hiki."}
-        </p>
-      )}
-
       <p className="muted">
-        Picha zinasogea polepole kama documentary ya picha; video za AI zikiwepo zinachezwa kama zilivyo. Sauti ya
-        msimulizi inasikika wakati wa kucheza tu (kwa kutumia sauti ya kifaa chako). Faili la kupakua halina sauti.
+        Sauti ya AI inatengenezwa na Gemini, inasomwa kwa Kiswahili na inarekodiwa pamoja na picha, kwa hiyo faili
+        unalopakua lina sauti. Kasi ya picha hurekebishwa yenyewe ili simulizi iishe kabla ya onyesho kubadilika.
       </p>
     </section>
   );
