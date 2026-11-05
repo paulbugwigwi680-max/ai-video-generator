@@ -239,7 +239,10 @@ button.pw-toggle:hover { background: #e6ebef; color: var(--ink); }
 
 .auth-back { color: var(--ink-soft); font-size: 0.9rem; text-decoration: none; }
 .auth-back:hover { color: var(--sea-dark); text-decoration: underline; }
-
+/* ---------- Share link (Cloudinary) ---------- */
+.share { margin-top: 16px; max-width: 960px; }
+.share label { margin: 0 0 6px; }
+.share .row input { flex: 1; min-width: 220px; }
 @media (max-width: 480px) {
   .auth-card { padding: 28px 20px 24px; }
   .auth-card h1 { font-size: 1.55rem; }
