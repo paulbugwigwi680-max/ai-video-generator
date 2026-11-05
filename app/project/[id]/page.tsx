@@ -71,7 +71,16 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
       const src = sh.videoUrl ?? sh.keyframeUrl;
       if (!src) return [];
       const kind: Clip["kind"] = sh.videoUrl ? "video" : "image";
-      return [{ kind, src, duration: sh.duration, caption: words.slice(j * per, (j + 1) * per).join(" "), speak: "" }];
+      return [
+        {
+          kind,
+          src,
+          duration: sh.duration,
+          caption: words.slice(j * per, (j + 1) * per).join(" "),
+          speak: "",
+          scene: s.position,
+        },
+      ];
     });
     return sceneClips.map((c, k) => ({ ...c, speak: k === 0 ? s.narration : "" }));
   });
