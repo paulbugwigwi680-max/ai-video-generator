@@ -5,6 +5,7 @@ import { pickVoice, voicesFor } from "@/lib/voices";
 import { AI_VOICES, DEFAULT_AI_VOICE } from "@/lib/tts-voices";
 import { fetchNarration, newAudioContext } from "@/lib/narration-client";
 import { uploadToCloudinary } from "@/lib/cloudinary-client";
+import { analyzeNarration, fadeOutMaster, makeMaster, playFaded, type Narration } from "@/lib/audio-utils";
 
 export type Clip = {
   kind: "video" | "image";
@@ -19,7 +20,9 @@ type Media = HTMLImageElement | HTMLVideoElement;
 
 const W = 1280;
 const H = 720;
-const LEAD = 0.25; // seconds of silence before narration starts in each scene
+const LEAD = 0.25; // silence before narration starts in each scene
+const TAIL = 0.9; // silent, fading-out ending so the file never stops abruptly
+const END_FADE = 0.7;
 
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
   const words = text.split(/\s+/).filter(Boolean);
@@ -39,7 +42,7 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
 }
 
 // Stretches each scene so the narration always fits, then computes the timeline.
-function buildPlan(clips: Clip[], audio: Map<number, AudioBuffer> | null) {
+function buildPlan(clips: Clip[], audio: Map<number, Narration> | null) {
   const out: Clip[] = [];
   const sceneStarts = new Map<number, number>();
   let acc = 0;
@@ -49,13 +52,14 @@ function buildPlan(clips: Clip[], audio: Map<number, AudioBuffer> | null) {
     const group: Clip[] = [];
     while (i < clips.length && clips[i].scene === scene) group.push(clips[i++]);
     const sum = group.reduce((a, c) => a + c.duration, 0);
-    const buf = audio?.get(scene);
-    const target = buf ? Math.max(sum, buf.duration + LEAD + 0.7) : sum;
+    const narr = audio?.get(scene);
+    const target = narr ? Math.max(sum, narr.dur + LEAD + 0.7) : sum;
     const k = target / sum;
     sceneStarts.set(scene, acc);
     for (const c of group) out.push({ ...c, duration: c.duration * k });
     acc += target;
   }
+  if (out.length) out[out.length - 1].duration += TAIL;
   const starts: number[] = [];
   let t = 0;
   for (const c of out) {
@@ -72,6 +76,7 @@ function drawFrame(
   starts: number[],
   media: Media[],
   t: number,
+  total: number,
   state: { idx: number }
 ): number {
   let i = clips.findIndex((c, k) => t >= starts[k] && t < starts[k] + c.duration);
@@ -104,9 +109,7 @@ function drawFrame(
       const scale = Math.max(W / sw, H / sh) * zoom;
       const dw = sw * scale;
       const dh = sh * scale;
-      ctx.globalAlpha = Math.min(1, local / 0.08); // fade in
       ctx.drawImage(el, (W - dw) / 2, (H - dh) / 2, dw, dh);
-      ctx.globalAlpha = 1;
     }
   }
 
@@ -129,6 +132,13 @@ function drawFrame(
   ctx.textAlign = "right";
   ctx.fillText("B U G W I G W I", W - 36, 44);
   ctx.textAlign = "left";
+
+  // Fade in from black at the start and out to black at the end (clean beginning and ending).
+  const fade = Math.min(1, Math.max(Math.max(0, 1 - t / 0.5), Math.max(0, (t - (total - END_FADE)) / END_FADE)));
+  if (fade > 0) {
+    ctx.fillStyle = `rgba(0,0,0,${fade})`;
+    ctx.fillRect(0, 0, W, H);
+  }
 
   return i;
 }
@@ -208,7 +218,7 @@ export default function Documentary({
 
     const paint = () => {
       const ctx = canvasRef.current?.getContext("2d");
-      if (ctx) drawFrame(ctx, base.clips, base.starts, mediaRef.current, 0, { idx: -1 });
+      if (ctx) drawFrame(ctx, base.clips, base.starts, mediaRef.current, 0.6, base.total, { idx: -1 });
     };
     const first = mediaRef.current[0];
     if (first instanceof HTMLImageElement) first.onload = paint;
@@ -274,7 +284,7 @@ export default function Documentary({
 
     // 1. Narration audio (AI voice) so it can be heard AND recorded into the file.
     let actx: AudioContext | null = null;
-    let audio: Map<number, AudioBuffer> | null = null;
+    let audio: Map<number, Narration> | null = null;
     if (voiceMode === "ai") {
       try {
         actx = newAudioContext();
@@ -287,7 +297,7 @@ export default function Documentary({
           n++;
           if (!text) continue;
           setPrep(`Inaandaa sauti ya AI… ${n}/${scenes.length}`);
-          audio.set(sc, await fetchNarration(actx, text, aiVoice));
+          audio.set(sc, analyzeNarration(await fetchNarration(actx, text, aiVoice)));
         }
       } catch (e) {
         setMsg(`${(e as Error).message} Inatumika sauti ya kifaa badala yake (haiingii kwenye faili la video).`);
@@ -300,7 +310,7 @@ export default function Documentary({
     const hasAiAudio = !!actx && !!audio && audio.size > 0;
     const plan = buildPlan(clips, hasAiAudio ? audio : null);
 
-    // 2. Recorder (video + narration mixed together).
+    // 2. Recorder (video + narration mixed together). WebM/Opus first: it is the cleanest.
     let completed = false;
     let recorder: MediaRecorder | null = null;
     const chunks: Blob[] = [];
@@ -309,13 +319,13 @@ export default function Documentary({
     if (record) {
       const tracks = [...canvas.captureStream(30).getVideoTracks(), ...(dest ? dest.stream.getAudioTracks() : [])];
       const candidates = dest
-        ? ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
-        : ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"];
+        ? ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4"]
+        : ["video/webm;codecs=vp9", "video/webm", "video/mp4;codecs=avc1", "video/mp4"];
       const mime = candidates.find((t) => MediaRecorder.isTypeSupported(t));
       recorder = new MediaRecorder(new MediaStream(tracks), {
         mimeType: mime,
-        videoBitsPerSecond: 5_000_000,
-        audioBitsPerSecond: 128_000,
+        videoBitsPerSecond: 8_000_000,
+        audioBitsPerSecond: 160_000,
       });
       recorder.ondataavailable = (e) => {
         if (e.data.size) chunks.push(e.data);
@@ -338,20 +348,17 @@ export default function Documentary({
       if (!dest) setMsg((m) => m || "Rekodi hii haitakuwa na sauti (sauti ya AI haikupatikana).");
     }
 
-    // 3. Schedule the narration sources against the audio clock.
+    // 3. Schedule the narration against the audio clock, through one clean master output.
     const sources: AudioBufferSourceNode[] = [];
     if (actx && audio && hasAiAudio) {
+      const master = makeMaster(actx, dest);
       const a0 = actx.currentTime + 0.15;
-      audio.forEach((buf, scene) => {
+      audio.forEach((narr, scene) => {
         const at = plan.sceneStarts.get(scene);
         if (at === undefined) return;
-        const src = actx!.createBufferSource();
-        src.buffer = buf;
-        src.connect(actx!.destination);
-        if (dest) src.connect(dest);
-        src.start(a0 + at + LEAD);
-        sources.push(src);
+        sources.push(playFaded(actx!, master, narr, a0 + at + LEAD));
       });
+      fadeOutMaster(master, a0 + plan.total - END_FADE, END_FADE * 0.8);
     }
 
     // 4. Device voice (only when AI voice is not used).
@@ -399,9 +406,9 @@ export default function Documentary({
       });
       synth?.cancel();
       const r = recorder;
-      if (r && r.state !== "inactive") setTimeout(() => r.stop(), 300);
+      if (r && r.state !== "inactive") setTimeout(() => r.stop(), 400);
       const ac = actx;
-      if (ac) setTimeout(() => ac.close().catch(() => {}), 600);
+      if (ac) setTimeout(() => ac.close().catch(() => {}), 900);
       setPlaying(false);
       setRecording(false);
       cancelRef.current = null;
@@ -411,12 +418,12 @@ export default function Documentary({
     const tick = () => {
       const t = Math.max(0, (performance.now() - t0) / 1000);
       if (t >= plan.total) {
-        drawFrame(ctx, plan.clips, plan.starts, mediaRef.current, plan.total - 0.001, state);
+        drawFrame(ctx, plan.clips, plan.starts, mediaRef.current, plan.total, plan.total, state);
         completed = true;
         finish();
         return;
       }
-      const i = drawFrame(ctx, plan.clips, plan.starts, mediaRef.current, t, state);
+      const i = drawFrame(ctx, plan.clips, plan.starts, mediaRef.current, t, plan.total, state);
       if (i !== lastIdx) {
         lastIdx = i;
         speak(plan.clips[i].speak);
