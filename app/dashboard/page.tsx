@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { isAdminEmail } from "@/lib/admin";
 import NewProjectForm from "@/components/NewProjectForm";
 import SignOut from "@/components/SignOut";
 import Logo from "@/components/Logo";
@@ -32,6 +33,7 @@ export default async function Dashboard() {
           <Logo size={36} tone="light" tagline={false} />
         </Link>
         <span className="row">
+          {isAdminEmail(user.email) && <Link href="/admin" className="credits">Admin</Link>}
           <Link href="/credits" className="credits">
             Credits: <b>{profile?.credits ?? 0}</b> · Nunua
           </Link>
