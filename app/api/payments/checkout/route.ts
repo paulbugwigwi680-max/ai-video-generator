@@ -18,6 +18,24 @@ export async function POST(req: Request) {
   const secret = process.env.FLW_SECRET_KEY;
   const db = adminClient();
 
+  // No online payment provider: free credits only when ALLOW_FREE_CREDITS=true (testing).
+  // It is NOT tied to DEMO_MODE, so nobody can get free credits by accident.
+  if (!secret) {
+    if (process.env.ALLOW_FREE_CREDITS === "true") {
+      await db.from("transactions").insert({
+        user_id: user.id,
+        amount: 0,
+        currency: CURRENCY,
+        credits: pkg.credits,
+        provider: "demo",
+        status: "completed",
+      });
+      await addCredits(user.id, pkg.credits);
+      return NextResponse.json({ demo: true });
+    }
+    return NextResponse.json({ error: "Malipo ya mtandaoni bado hayajawashwa. Tumia 'Lipa kwa simu'." }, { status: 503 });
+  }
+
   const { data: tx, error } = await db
     .from("transactions")
     .insert({
@@ -25,23 +43,12 @@ export async function POST(req: Request) {
       amount: pkg.amount,
       currency: CURRENCY,
       credits: pkg.credits,
-      provider: secret ? "flutterwave" : "demo",
+      provider: "flutterwave",
       status: "pending",
     })
     .select("id")
     .single();
   if (error || !tx) return NextResponse.json({ error: "Imeshindwa kuanzisha malipo." }, { status: 500 });
-
-  // No payment provider configured: only allowed in DEMO_MODE (free test credits).
-  if (!secret) {
-    if (process.env.DEMO_MODE === "true") {
-      await db.from("transactions").update({ status: "completed" }).eq("id", tx.id);
-      await addCredits(user.id, pkg.credits);
-      return NextResponse.json({ demo: true });
-    }
-    await db.from("transactions").update({ status: "failed" }).eq("id", tx.id);
-    return NextResponse.json({ error: "Malipo bado hayajawashwa." }, { status: 503 });
-  }
 
   const res = await fetch("https://api.flutterwave.com/v3/payments", {
     method: "POST",
