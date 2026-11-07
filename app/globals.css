@@ -227,7 +227,18 @@ button.pw-toggle:hover { background: #e6ebef; color: var(--ink); }
 .auth-card .field label { margin: 0 0 6px; text-align: left; }
 .auth-card input { font-size: 16px; padding: 12px 14px; }
 .auth-card .pw input { padding-right: 48px; }
-
+/* ---------- Admin + manual payments ---------- */
+.admin h2 { font-size: 1.3rem; margin: 32px 0 12px; }
+.stat { display: flex; gap: 32px; flex-wrap: wrap; margin: 16px 0 8px; }
+.stat b { display: block; font-family: var(--font-head); font-size: 1.9rem; line-height: 1.1; }
+.grant { display: grid; grid-template-columns: 2fr 1fr 2fr auto; gap: 12px; align-items: end; }
+@media (max-width: 800px) { .grant { grid-template-columns: 1fr; } }
+.grant label { margin: 0 0 6px; }
+.quick { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.admin code { background: #e6ebef; padding: 2px 6px; border-radius: 3px; }
+.manual { background: var(--paper); border-left: 4px solid var(--sea); padding: 18px 20px 22px; max-width: 640px; margin: 0 0 36px; }
+.manual h2 { font-size: 1.2rem; margin-bottom: 6px; }
+.manual pre { white-space: pre-wrap; font: inherit; margin: 8px 0 14px; }
 .forgot-row { display: flex; justify-content: flex-end; margin: -6px 0 4px; }
 .forgot-row .linklike { font-size: 0.9rem; padding: 2px 0; }
 
