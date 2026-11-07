@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import Logo from "@/components/Logo";
 import BuyButton from "@/components/BuyButton";
+import ManualPay from "@/components/ManualPay";
 import { CURRENCY, PACKAGES } from "@/lib/packages";
 
 const STATUS: Record<string, string> = {
@@ -27,6 +28,10 @@ export default async function CreditsPage({ searchParams }: { searchParams: Prom
       .order("created_at", { ascending: false })
       .limit(10),
   ]);
+
+  const gateway = !!process.env.FLW_SECRET_KEY;
+  const note = (process.env.PAYMENT_NOTE ?? "").trim();
+  const plain = PACKAGES.map((p) => ({ id: p.id, name: p.name, credits: p.credits, amount: p.amount }));
 
   return (
     <>
@@ -55,10 +60,16 @@ export default async function CreditsPage({ searchParams }: { searchParams: Prom
               <h3>{p.name}</h3>
               <div className="big">{p.credits} credits</div>
               <div className="price">{CURRENCY} {p.amount.toLocaleString("en-US")}</div>
-              <BuyButton packageId={p.id} label="Nunua" />
+              {gateway && <BuyButton packageId={p.id} label="Nunua" />}
             </div>
           ))}
         </div>
+
+        {note ? (
+          <ManualPay packages={plain} note={note} currency={CURRENCY} />
+        ) : (
+          !gateway && <p className="muted">Ili kununua credits, wasiliana na msimamizi wa BUGWIGWI.</p>
+        )}
 
         <h2>Malipo ya hivi karibuni</h2>
         {txs?.length ? (
@@ -71,7 +82,7 @@ export default async function CreditsPage({ searchParams }: { searchParams: Prom
                 <tr key={t.id}>
                   <td>{new Date(t.created_at).toLocaleDateString("en-GB")}</td>
                   <td>{t.credits}</td>
-                  <td>{t.currency} {Number(t.amount).toLocaleString("en-US")}</td>
+                  <td>{Number(t.amount) > 0 ? `${t.currency} ${Number(t.amount).toLocaleString("en-US")}` : "—"}</td>
                   <td>{STATUS[t.status] ?? t.status}</td>
                 </tr>
               ))}
