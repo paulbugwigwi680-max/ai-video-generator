@@ -29,7 +29,8 @@ export async function updateSession(request: NextRequest) {
     path.startsWith("/dashboard") ||
     path.startsWith("/project") ||
     path.startsWith("/credits") ||
-    path.startsWith("/talk");
+    path.startsWith("/talk") ||
+    path.startsWith("/admin");
   if (!user && isProtected) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
