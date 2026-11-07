@@ -5,6 +5,7 @@ import { pickVoice, voicesFor } from "@/lib/voices";
 import { AI_VOICES, DEFAULT_AI_VOICE } from "@/lib/tts-voices";
 import { fetchNarration, newAudioContext } from "@/lib/narration-client";
 import { uploadToCloudinary } from "@/lib/cloudinary-client";
+import { analyzeNarration, fadeOutMaster, makeMaster, playFaded } from "@/lib/audio-utils";
 
 type Mode = "talk" | "song";
 type Ratio = "wide" | "tall";
@@ -59,7 +60,8 @@ function drawScene(
   mouth: Mouth | null,
   mode: Mode,
   t: number,
-  showMarker: boolean
+  showMarker: boolean,
+  fade: number // 0..1 black overlay (clean start and end)
 ) {
   ctx.fillStyle = "#0b1218";
   ctx.fillRect(0, 0, W, H);
@@ -142,6 +144,11 @@ function drawScene(
   ctx.textAlign = "right";
   ctx.fillText("AI · BUGWIGWI", W - 28, 40);
   ctx.textAlign = "left";
+
+  if (fade > 0) {
+    ctx.fillStyle = `rgba(0,0,0,${Math.min(1, fade)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
 }
 
 export default function TalkPhoto() {
@@ -199,7 +206,7 @@ export default function TalkPhoto() {
     const ctx = canvasRef.current?.getContext("2d");
     if (!ctx) return;
     const first = toSegments(script, mode)[0] ?? "";
-    drawScene(ctx, size.w, size.h, imgRef.current, first, 0, 0, mouth, mode, 0, true);
+    drawScene(ctx, size.w, size.h, imgRef.current, first, 0, 0, mouth, mode, 0, true, 0);
   }, [hasPhoto, ratio, script, mode, mouth, playing, size.w, size.h]);
 
   useEffect(() => () => cancelRef.current?.(), []);
@@ -264,25 +271,26 @@ export default function TalkPhoto() {
 
     // 1. AI narration of the WHOLE script (so it can be heard and recorded).
     let actx: AudioContext | null = null;
-    let buf: AudioBuffer | null = null;
+    let narr: ReturnType<typeof analyzeNarration> | null = null;
     if (voiceMode === "ai") {
       try {
         actx = newAudioContext();
         await actx.resume();
         setPrep("Inaandaa sauti ya AI…");
         const styleText = style.trim() || (mode === "song" ? "in a melodic, rhythmic, sing-song way" : "");
-        buf = await fetchNarration(actx, segments.join("\n").slice(0, 1800), aiVoice, styleText);
+        const buf = await fetchNarration(actx, segments.join("\n").slice(0, 1800), aiVoice, styleText);
+        narr = analyzeNarration(buf);
       } catch (e) {
         setMsg(`${(e as Error).message} Inatumika sauti ya kifaa badala yake (haiingii kwenye faili la video).`);
         actx?.close().catch(() => {});
         actx = null;
-        buf = null;
+        narr = null;
       }
       setPrep("");
     }
-    const ai = !!actx && !!buf;
+    const ai = !!actx && !!narr;
 
-    // 2. Recorder (video + voice).
+    // 2. Recorder (video + voice). WebM/Opus first: it is the cleanest.
     let completed = false;
     let recorder: MediaRecorder | null = null;
     const chunks: Blob[] = [];
@@ -290,13 +298,13 @@ export default function TalkPhoto() {
     if (record) {
       const tracks = [...canvas.captureStream(30).getVideoTracks(), ...(dest ? dest.stream.getAudioTracks() : [])];
       const candidates = dest
-        ? ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
-        : ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"];
+        ? ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4"]
+        : ["video/webm;codecs=vp9", "video/webm", "video/mp4;codecs=avc1", "video/mp4"];
       const mime = candidates.find((t) => MediaRecorder.isTypeSupported(t));
       recorder = new MediaRecorder(new MediaStream(tracks), {
         mimeType: mime,
-        videoBitsPerSecond: 5_000_000,
-        audioBitsPerSecond: 128_000,
+        videoBitsPerSecond: 8_000_000,
+        audioBitsPerSecond: 160_000,
       });
       recorder.ondataavailable = (e) => {
         if (e.data.size) chunks.push(e.data);
@@ -340,9 +348,9 @@ export default function TalkPhoto() {
       }
       window.speechSynthesis?.cancel();
       const r = recorder;
-      if (r && r.state !== "inactive") window.setTimeout(() => r.stop(), 300);
+      if (r && r.state !== "inactive") window.setTimeout(() => r.stop(), 400);
       const ac = actx;
-      if (ac) window.setTimeout(() => ac.close().catch(() => {}), 600);
+      if (ac) window.setTimeout(() => ac.close().catch(() => {}), 900);
       setPlaying(false);
       setRecording(false);
       cancelRef.current = null;
@@ -354,9 +362,9 @@ export default function TalkPhoto() {
     setRecording(record);
     if (recorder) recorder.start(250);
 
-    if (ai && actx && buf) {
+    if (ai && actx && narr) {
       // ---- AI voice: everything follows the audio clock and the real loudness ----
-      const D = buf.duration;
+      const D = narr.dur;
       const weights = segments.map((s) => s.length + 1);
       const sum = weights.reduce((a, b) => a + b, 0);
       const bounds: number[] = [];
@@ -367,20 +375,19 @@ export default function TalkPhoto() {
       }
       bounds.push(D);
 
+      const master = makeMaster(actx, dest);
       analyser = actx.createAnalyser();
       analyser.fftSize = 1024;
-      analyser.connect(actx.destination);
-      if (dest) analyser.connect(dest);
-      src = actx.createBufferSource();
-      src.buffer = buf;
-      src.connect(analyser);
-      const audioStart = actx.currentTime + 0.35;
-      src.start(audioStart);
+      analyser.connect(master);
+      const audioStart = actx.currentTime + 0.4;
+      src = playFaded(actx, analyser, narr, audioStart);
+      fadeOutMaster(master, audioStart + D + 0.15, 0.55);
 
+      const TAIL = 0.9;
       const tick = () => {
         const now = (performance.now() - t0) / 1000;
         const el = actx!.currentTime - audioStart;
-        if (el > D + 0.8) {
+        if (el > D + TAIL) {
           completed = true;
           finish();
           return;
@@ -399,7 +406,12 @@ export default function TalkPhoto() {
         const rms = Math.sqrt(s2 / levels.length);
         amp = amp * 0.5 + Math.min(1, rms * 5) * 0.5;
 
-        drawScene(ctx, size.w, size.h, img, segments[seg], p, el >= 0 && el <= D ? amp : 0, mouth, mode, now, false);
+        const fadeIn = Math.max(0, 1 - now / 0.4);
+        const fadeOut = Math.max(0, (el - (D + 0.15)) / (TAIL - 0.15));
+        drawScene(
+          ctx, size.w, size.h, img, segments[seg], p,
+          el >= 0 && el <= D ? amp : 0, mouth, mode, now, false, Math.max(fadeIn, fadeOut)
+        );
         raf = requestAnimationFrame(tick);
       };
       raf = requestAnimationFrame(tick);
@@ -426,7 +438,7 @@ export default function TalkPhoto() {
           window.setTimeout(() => {
             completed = true;
             finish();
-          }, 700)
+          }, 900)
         );
         return;
       }
@@ -468,7 +480,11 @@ export default function TalkPhoto() {
       const now = performance.now();
       const p = Math.min(1, (now - run.segStart) / 1000 / run.segDur);
       const fakeAmp = run.speaking ? 0.3 + 0.3 * Math.abs(Math.sin(((now - t0) / 1000) * 9)) : 0;
-      drawScene(ctx, size.w, size.h, img, segments[Math.min(run.seg, segments.length - 1)], p, fakeAmp, mouth, mode, (now - t0) / 1000, false);
+      const fadeIn = Math.max(0, 1 - (now - t0) / 1000 / 0.4);
+      drawScene(
+        ctx, size.w, size.h, img, segments[Math.min(run.seg, segments.length - 1)], p,
+        fakeAmp, mouth, mode, (now - t0) / 1000, false, fadeIn
+      );
       raf = requestAnimationFrame(tick);
     };
 
