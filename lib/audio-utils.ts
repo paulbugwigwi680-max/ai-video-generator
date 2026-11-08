@@ -27,7 +27,8 @@ export function analyzeNarration(buf: AudioBuffer): Narration {
 }
 
 // Plays a narration with a short fade-in and a longer fade-out (prevents clicks).
-export function playFaded(ctx: AudioContext, out: AudioNode, n: Narration, when: number): AudioBufferSourceNode {
+// Works with a normal AudioContext and with an OfflineAudioContext (used for MP4 export).
+export function playFaded(ctx: BaseAudioContext, out: AudioNode, n: Narration, when: number): AudioBufferSourceNode {
   const src = ctx.createBufferSource();
   src.buffer = n.buf;
   const g = ctx.createGain();
@@ -44,7 +45,7 @@ export function playFaded(ctx: AudioContext, out: AudioNode, n: Narration, when:
 }
 
 // Master output: slightly lowered level and a high-pass filter that removes rumble.
-export function makeMaster(ctx: AudioContext, rec: MediaStreamAudioDestinationNode | null): GainNode {
+export function makeMaster(ctx: BaseAudioContext, rec: MediaStreamAudioDestinationNode | null): GainNode {
   const master = ctx.createGain();
   master.gain.value = 0.92;
   const hp = ctx.createBiquadFilter();
@@ -56,7 +57,7 @@ export function makeMaster(ctx: AudioContext, rec: MediaStreamAudioDestinationNo
   return master;
 }
 
-// Fades everything out smoothly so the recording never ends abruptly.
+// Fades everything out smoothly so the audio never ends abruptly.
 export function fadeOutMaster(master: GainNode, at: number, seconds: number) {
   master.gain.setValueAtTime(master.gain.value, at);
   master.gain.linearRampToValueAtTime(0, at + seconds);
