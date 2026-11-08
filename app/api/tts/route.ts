@@ -58,8 +58,10 @@ export async function POST(req: Request) {
   if (!key) return NextResponse.json({ error: "Funguo ya Gemini haijawekwa." }, { status: 503 });
 
   const body = await req.json().catch(() => ({}));
-  const spoken = String(body.text ?? "").trim().slice(0, 1800);
+  let spoken = String(body.text ?? "").trim().slice(0, 1800);
   if (!spoken) return NextResponse.json({ error: "Hakuna maneno ya kusoma." }, { status: 400 });
+  // A sentence that ends with punctuation lets the voice finish cleanly (no trailing noise).
+  if (!/[.!?…]$/.test(spoken)) spoken += ".";
   const voice = AI_VOICE_IDS.includes(body.voice) ? (body.voice as string) : DEFAULT_AI_VOICE;
   const style = String(body.style ?? "").trim().slice(0, 160);
   // Natural-language style steers the delivery (e.g. "in a melodic, rhythmic way").
