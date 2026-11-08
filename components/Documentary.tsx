@@ -6,6 +6,9 @@ import { AI_VOICES, DEFAULT_AI_VOICE } from "@/lib/tts-voices";
 import { fetchNarration, newAudioContext } from "@/lib/narration-client";
 import { uploadToCloudinary } from "@/lib/cloudinary-client";
 import { analyzeNarration, fadeOutMaster, makeMaster, playFaded, type Narration } from "@/lib/audio-utils";
+import { scheduleBeat, type Interval } from "@/lib/beat";
+import { blurredBackground, fitRect } from "@/lib/frame-fit";
+import { canExportMp4, renderMp4 } from "@/lib/mp4-render";
 
 export type Clip = {
   kind: "video" | "image";
@@ -69,6 +72,32 @@ function buildPlan(clips: Clip[], audio: Map<number, Narration> | null) {
   return { clips: out, starts, total: t, sceneStarts };
 }
 
+// When does each narration speak? (relative to the start of the video)
+function speechIntervals(plan: ReturnType<typeof buildPlan>, audio: Map<number, Narration>): Interval[] {
+  const out: Interval[] = [];
+  audio.forEach((narr, scene) => {
+    const at = plan.sceneStarts.get(scene);
+    if (at !== undefined) out.push({ start: at + LEAD, end: at + LEAD + narr.dur });
+  });
+  return out;
+}
+
+function seekVideo(v: HTMLVideoElement, time: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (Math.abs(v.currentTime - time) < 0.01 && v.readyState >= 2) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      v.removeEventListener("seeked", done);
+      resolve();
+    };
+    v.addEventListener("seeked", done);
+    v.currentTime = time;
+    setTimeout(done, 1500);
+  });
+}
+
 // Draws one frame of the documentary at time t (seconds). Returns the index of the active clip.
 function drawFrame(
   ctx: CanvasRenderingContext2D,
@@ -98,27 +127,25 @@ function drawFrame(
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, W, H);
 
-  if (el) {
-    const isVideo = el instanceof HTMLVideoElement;
-    const ready = isVideo ? el.readyState >= 2 : el.complete && el.naturalWidth > 0;
-    if (ready) {
-      const sw = isVideo ? el.videoWidth : el.naturalWidth;
-      const sh = isVideo ? el.videoHeight : el.naturalHeight;
-      // Slow zoom ("Ken Burns") on still pictures, alternating direction.
-      const zoom = isVideo ? 1 : i % 2 ? 1.14 - 0.14 * local : 1 + 0.14 * local;
-      const scale = Math.max(W / sw, H / sh) * zoom;
-      const dw = sw * scale;
-      const dh = sh * scale;
-      ctx.drawImage(el, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  // People are never cut off: the whole picture is shown (blurred backdrop when the shape differs).
+  if (el instanceof HTMLVideoElement) {
+    if (el.readyState >= 2 && el.videoWidth) {
+      const r = fitRect(el.videoWidth, el.videoHeight, W, H, 1);
+      ctx.drawImage(el, r.dx, r.dy, r.dw, r.dh);
     }
+  } else if (el && el.complete && el.naturalWidth) {
+    const zoom = i % 2 ? 1.05 - 0.05 * local : 1 + 0.05 * local; // very gentle movement
+    const r = fitRect(el.naturalWidth, el.naturalHeight, W, H, zoom);
+    if (r.contain) ctx.drawImage(blurredBackground(el, W, H), 0, 0);
+    ctx.drawImage(el, r.dx, r.dy, r.dw, r.dh);
   }
 
   // Caption
-  const grad = ctx.createLinearGradient(0, H - 230, 0, H);
+  const grad = ctx.createLinearGradient(0, H - 200, 0, H);
   grad.addColorStop(0, "rgba(0,0,0,0)");
-  grad.addColorStop(1, "rgba(0,0,0,0.78)");
+  grad.addColorStop(1, "rgba(0,0,0,0.72)");
   ctx.fillStyle = grad;
-  ctx.fillRect(0, H - 230, W, 230);
+  ctx.fillRect(0, H - 200, W, 200);
   ctx.fillStyle = "#fff";
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
@@ -133,7 +160,7 @@ function drawFrame(
   ctx.fillText("B U G W I G W I", W - 36, 44);
   ctx.textAlign = "left";
 
-  // Fade in from black at the start and out to black at the end (clean beginning and ending).
+  // Fade in from black at the start and out to black at the end.
   const fade = Math.min(1, Math.max(Math.max(0, 1 - t / 0.5), Math.max(0, (t - (total - END_FADE)) / END_FADE)));
   if (fade > 0) {
     ctx.fillStyle = `rgba(0,0,0,${fade})`;
@@ -164,18 +191,20 @@ export default function Documentary({
 
   const [playing, setPlaying] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [exportPct, setExportPct] = useState<number | null>(null);
   const [prep, setPrep] = useState("");
   const [msg, setMsg] = useState("");
 
-  // Narration voice
+  // Narration voice + background beat
   const [voiceMode, setVoiceMode] = useState<"ai" | "device">("ai");
   const [aiVoice, setAiVoice] = useState(DEFAULT_AI_VOICE);
+  const [beat, setBeat] = useState(true);
   const [deviceVoices, setDeviceVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [deviceVoice, setDeviceVoice] = useState("");
 
   // Sharing (Cloudinary)
   const [lastBlob, setLastBlob] = useState<Blob | null>(null);
-  const [lastName, setLastName] = useState("documentary.webm");
+  const [lastName, setLastName] = useState("documentary.mp4");
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [shareUrl, setShareUrl] = useState<string | null>(finalUrl);
@@ -233,6 +262,19 @@ export default function Documentary({
     cancelRef.current?.();
   }
 
+  function saveBlob(blob: Blob, filename: string) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    setLastBlob(blob);
+    setLastName(filename);
+  }
+
+  const fileBase = () => title.replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 50) || "documentary";
+
   async function share() {
     if (!lastBlob || uploading) return;
     setUploading(true);
@@ -268,6 +310,118 @@ export default function Documentary({
     }
   }
 
+  // ---------- MP4 export: exact, frame by frame, with clean audio ----------
+  async function exportMp4() {
+    const canvas = canvasRef.current;
+    if (!canvas || !clips.length || busyRef.current) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    if (!canExportMp4()) {
+      setMsg("Kivinjari hiki hakiwezi kutengeneza MP4 moja kwa moja (tumia Chrome au Edge). Inarekodi kwa njia ya kawaida (WebM).");
+      await start(true);
+      return;
+    }
+    busyRef.current = true;
+    stop();
+    setMsg("");
+    setShareMsg("");
+    setExportPct(0);
+
+    try {
+      // 1. Narration (AI voice). It is decoded with an offline context, so no sound plays now.
+      let audio: Map<number, Narration> | null = null;
+      if (voiceMode === "ai") {
+        try {
+          const dec = new OfflineAudioContext(1, 1, 48000);
+          audio = new Map();
+          const scenes = Array.from(new Set(clips.map((c) => c.scene)));
+          let n = 0;
+          for (const sc of scenes) {
+            const text = clips.find((c) => c.scene === sc && c.speak)?.speak;
+            n++;
+            if (!text) continue;
+            setPrep(`Inaandaa sauti ya AI… ${n}/${scenes.length}`);
+            audio.set(sc, analyzeNarration(await fetchNarration(dec, text, aiVoice)));
+          }
+        } catch (e) {
+          setMsg(`${(e as Error).message} MP4 itatoka bila sauti.`);
+          audio = null;
+        }
+        setPrep("");
+      } else {
+        setMsg("Sauti ya kifaa haiingii kwenye video. Chagua 'Sauti ya AI' ili MP4 iwe na sauti.");
+      }
+      const hasAudio = !!audio && audio.size > 0;
+      const plan = buildPlan(clips, hasAudio ? audio : null);
+
+      // 2. Make sure every picture is loaded.
+      await Promise.all(
+        mediaRef.current.map((m) =>
+          m instanceof HTMLImageElement && !m.complete
+            ? new Promise<void>((r) => {
+                m.onload = () => r();
+                m.onerror = () => r();
+              })
+            : Promise.resolve()
+        )
+      );
+
+      // 3. Mix narration + beat offline (exact length, no real-time glitches).
+      let rendered: AudioBuffer | null = null;
+      if (hasAudio && audio) {
+        const sr = 48000;
+        const off = new OfflineAudioContext(1, Math.ceil(plan.total * sr), sr);
+        const master = makeMaster(off, null);
+        audio.forEach((narr, scene) => {
+          const at = plan.sceneStarts.get(scene);
+          if (at !== undefined) playFaded(off, master, narr, at + LEAD);
+        });
+        if (beat) scheduleBeat(off, master, 0, plan.total, speechIntervals(plan, audio));
+        fadeOutMaster(master, plan.total - END_FADE, END_FADE * 0.8);
+        rendered = await off.startRendering();
+      }
+
+      // 4. Render every frame and write the MP4.
+      const state = { idx: -1 };
+      const blob = await renderMp4({
+        canvas,
+        width: W,
+        height: H,
+        duration: plan.total,
+        audio: rendered,
+        onProgress: setExportPct,
+        drawAt: async (t) => {
+          let i = plan.clips.findIndex((c, k) => t >= plan.starts[k] && t < plan.starts[k] + c.duration);
+          if (i < 0) i = plan.clips.length - 1;
+          const el = mediaRef.current[i];
+          if (el instanceof HTMLVideoElement) {
+            const local = Math.max(0, t - plan.starts[i]);
+            await seekVideo(el, Math.min(local, Math.max(0, (el.duration || 0) - 0.05)));
+          }
+          state.idx = i; // frames are drawn one by one, so no play/pause logic is needed
+          drawFrame(ctx, plan.clips, plan.starts, mediaRef.current, Math.min(t, plan.total - 0.001), plan.total, state);
+        },
+      });
+      saveBlob(blob, `${fileBase()}.mp4`);
+      drawFrame(ctx, base.clips, base.starts, mediaRef.current, 0.6, base.total, { idx: -1 });
+    } catch (e) {
+      const m = (e as Error).message;
+      busyRef.current = false;
+      setExportPct(null);
+      setPrep("");
+      if (m === "AAC_UNSUPPORTED") {
+        setMsg("Kivinjari hiki hakiwezi kuweka sauti kwenye MP4. Inarekodi kwa njia ya kawaida (WebM).");
+        await start(true);
+      } else {
+        setMsg(`Imeshindwa kutengeneza MP4: ${m}`);
+      }
+      return;
+    }
+    setExportPct(null);
+    busyRef.current = false;
+  }
+
+  // ---------- Live playback (and WebM fallback recording) ----------
   async function start(record: boolean) {
     const canvas = canvasRef.current;
     if (!canvas || !clips.length || busyRef.current) return;
@@ -279,10 +433,10 @@ export default function Documentary({
     }
     busyRef.current = true;
     stop();
-    setMsg("");
+    setMsg((m) => (record ? m : ""));
     setShareMsg("");
 
-    // 1. Narration audio (AI voice) so it can be heard AND recorded into the file.
+    // 1. Narration audio (AI voice).
     let actx: AudioContext | null = null;
     let audio: Map<number, Narration> | null = null;
     if (voiceMode === "ai") {
@@ -310,12 +464,11 @@ export default function Documentary({
     const hasAiAudio = !!actx && !!audio && audio.size > 0;
     const plan = buildPlan(clips, hasAiAudio ? audio : null);
 
-    // 2. Recorder (video + narration mixed together). WebM/Opus first: it is the cleanest.
+    // 2. Recorder (fallback only).
     let completed = false;
     let recorder: MediaRecorder | null = null;
     const chunks: Blob[] = [];
     const dest = hasAiAudio && actx ? actx.createMediaStreamDestination() : null;
-
     if (record) {
       const tracks = [...canvas.captureStream(30).getVideoTracks(), ...(dest ? dest.stream.getAudioTracks() : [])];
       const candidates = dest
@@ -333,22 +486,12 @@ export default function Documentary({
       recorder.onstop = () => {
         if (!completed) return;
         const type = recorder?.mimeType || "video/webm";
-        const blob = new Blob(chunks, { type });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        const baseName = title.replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 50) || "documentary";
-        const filename = `${baseName}.${type.includes("mp4") ? "mp4" : "webm"}`;
-        a.href = url;
-        a.download = filename;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 10000);
-        setLastBlob(blob);
-        setLastName(filename);
+        saveBlob(new Blob(chunks, { type }), `${fileBase()}.${type.includes("mp4") ? "mp4" : "webm"}`);
       };
       if (!dest) setMsg((m) => m || "Rekodi hii haitakuwa na sauti (sauti ya AI haikupatikana).");
     }
 
-    // 3. Schedule the narration against the audio clock, through one clean master output.
+    // 3. Schedule narration and beat against the audio clock, through one clean master output.
     const sources: AudioBufferSourceNode[] = [];
     if (actx && audio && hasAiAudio) {
       const master = makeMaster(actx, dest);
@@ -358,6 +501,7 @@ export default function Documentary({
         if (at === undefined) return;
         sources.push(playFaded(actx!, master, narr, a0 + at + LEAD));
       });
+      if (beat) scheduleBeat(actx, master, a0, plan.total, speechIntervals(plan, audio));
       fadeOutMaster(master, a0 + plan.total - END_FADE, END_FADE * 0.8);
     }
 
@@ -438,7 +582,7 @@ export default function Documentary({
     raf = requestAnimationFrame(tick);
   }
 
-  const preparing = prep !== "";
+  const working = prep !== "" || exportPct !== null;
 
   return (
     <section className="doc">
@@ -448,8 +592,8 @@ export default function Documentary({
       <div className="controls">
         {!playing ? (
           <>
-            <button onClick={() => start(false)} disabled={preparing}>▶ Cheza (~{Math.round(base.total)}s)</button>
-            <button className="ghost" onClick={() => start(true)} disabled={preparing}>⬇ Rekodi na pakua video</button>
+            <button onClick={() => start(false)} disabled={working}>▶ Cheza (~{Math.round(base.total)}s)</button>
+            <button className="ghost" onClick={exportMp4} disabled={working}>⬇ Pakua MP4</button>
           </>
         ) : (
           <button onClick={stop}>■ Simama</button>
@@ -458,13 +602,13 @@ export default function Documentary({
 
       <div className="voice-box">
         <label htmlFor="vmode">Sauti ya simulizi</label>
-        <select id="vmode" value={voiceMode} onChange={(e) => setVoiceMode(e.target.value as "ai" | "device")} disabled={playing}>
+        <select id="vmode" value={voiceMode} onChange={(e) => setVoiceMode(e.target.value as "ai" | "device")} disabled={playing || working}>
           <option value="ai">Sauti ya AI (kike au kiume, inaingia kwenye video)</option>
           <option value="device">Sauti ya kifaa (haiingii kwenye video)</option>
         </select>
 
         {voiceMode === "ai" ? (
-          <select aria-label="Chagua sauti ya AI" value={aiVoice} onChange={(e) => setAiVoice(e.target.value)} disabled={playing}>
+          <select aria-label="Chagua sauti ya AI" value={aiVoice} onChange={(e) => setAiVoice(e.target.value)} disabled={playing || working}>
             <optgroup label="Kike">
               {AI_VOICES.filter((v) => v.gender === "f").map((v) => (
                 <option key={v.id} value={v.id}>{v.label}</option>
@@ -477,16 +621,24 @@ export default function Documentary({
             </optgroup>
           </select>
         ) : (
-          <select aria-label="Chagua sauti ya kifaa" value={deviceVoice} onChange={(e) => setDeviceVoice(e.target.value)} disabled={playing}>
+          <select aria-label="Chagua sauti ya kifaa" value={deviceVoice} onChange={(e) => setDeviceVoice(e.target.value)} disabled={playing || working}>
             <option value="">Chagua yenyewe</option>
             {deviceVoices.map((v) => (
               <option key={v.name} value={v.name}>{v.name} ({v.lang})</option>
             ))}
           </select>
         )}
+
+        <label className="check">
+          <input type="checkbox" checked={beat} onChange={(e) => setBeat(e.target.checked)} disabled={playing || working} />
+          <span>Beat ya nyuma (instrumental): inasikika wakati msimulizi amenyamaza na inapungua anapoongea</span>
+        </label>
       </div>
 
-      {preparing && <p className="muted">{prep}</p>}
+      {prep && <p className="muted">{prep}</p>}
+      {exportPct !== null && (
+        <p className="muted">Inatengeneza MP4… {exportPct}%. Acha ukurasa huu wazi hadi imalize.</p>
+      )}
       {recording && (
         <p className="muted">Inarekodi… acha ukurasa huu wazi na usibadilishe tab hadi imalize.</p>
       )}
@@ -494,7 +646,7 @@ export default function Documentary({
 
       {lastBlob && !playing && (
         <div className="share">
-          <p className="info">Video yako imerekodiwa na kupakuliwa.</p>
+          <p className="info">Video yako imetengenezwa na kupakuliwa.</p>
           <button onClick={share} disabled={uploading}>
             {uploading ? `Inapakia… ${progress}%` : "☁ Pata link ya kushiriki"}
           </button>
@@ -514,8 +666,9 @@ export default function Documentary({
       {shareMsg && <p className="msg">{shareMsg}</p>}
 
       <p className="muted">
-        Sauti ya AI inatengenezwa na Gemini, inasomwa kwa Kiswahili na inarekodiwa pamoja na picha, kwa hiyo faili
-        unalopakua lina sauti. Kasi ya picha hurekebishwa yenyewe ili simulizi iishe kabla ya onyesho kubadilika.
+        Faili la MP4 linatengenezwa fremu kwa fremu pamoja na sauti, kwa hiyo linatoka safi bila kelele mwishoni.
+        Picha zinaonyeshwa nzima ili watu wasikatwe. Kasi ya onyesho hurekebishwa yenyewe ili simulizi iishe kabla
+        picha haijabadilika.
       </p>
     </section>
   );
