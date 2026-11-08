@@ -8,7 +8,7 @@ export function newAudioContext(): AudioContext {
 }
 
 export async function fetchNarration(
-  ctx: AudioContext,
+  ctx: BaseAudioContext,
   text: string,
   voice: string,
   style = ""
