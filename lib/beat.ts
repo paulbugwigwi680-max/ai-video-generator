@@ -26,8 +26,8 @@ export function scheduleBeat(
   if (duration < 2) return;
   const step = 60 / 96 / 4; // one 16th note
   const steps = Math.floor(duration / step);
-  const HI = 0.55; // level in the silences
-  const LO = 0.13; // level under the voice
+  const HI = 0.9; // level in the silences
+  const LO = 0.26; // level under the voice (still clearly audible, like a music bed)
 
   // Level bus: its gain curve ducks under speech and fades in/out.
   const bus = ctx.createGain();
@@ -57,7 +57,7 @@ export function scheduleBeat(
       const up = clamp01((t - iv.end) / 0.6);
       duck = Math.min(duck, 1 - down * (1 - up) * (1 - LO / HI));
     }
-    const fade = Math.min(1, t / 1.0, Math.max(0, (duration - t) / 1.4));
+    const fade = Math.min(1, t / 0.6, Math.max(0, (duration - t) / 1.4));
     curve[i] = HI * fade * duck;
   }
   bus.gain.setValueCurveAtTime(curve, t0, duration);
@@ -95,9 +95,28 @@ export function scheduleBeat(
   };
 
   const kick = (t: number) => {
-    const o = osc("sine", 150, t, 0.4);
-    o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
-    const g = env(t, 0.95, 0.004, 0.32);
+    const o = osc("sine", 190, t, 0.4);
+    o.frequency.exponentialRampToValueAtTime(60, t + 0.1);
+    const g = env(t, 0.95, 0.004, 0.3);
+    o.connect(g);
+    g.connect(bus);
+    // short click: small speakers cannot play deep bass, but they do play this
+    const n = noise(t, 0.03);
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.value = 3000;
+    bp.Q.value = 1;
+    const gc = env(t, 0.4, 0.001, 0.025);
+    n.connect(bp);
+    bp.connect(gc);
+    gc.connect(bus);
+  };
+  // conga-like hit: a warm mid-range drum that is easy to hear on any speaker
+  const conga = (t: number, hi: boolean) => {
+    const f = hi ? 380 : 290;
+    const o = osc("sine", f, t, 0.25);
+    o.frequency.exponentialRampToValueAtTime(f * 0.78, t + 0.12);
+    const g = env(t, 0.45, 0.002, 0.16);
     o.connect(g);
     g.connect(bus);
   };
@@ -121,16 +140,16 @@ export function scheduleBeat(
     const hp = ctx.createBiquadFilter();
     hp.type = "highpass";
     hp.frequency.value = 7500;
-    const g = env(t, 0.14 * vel, 0.001, open ? 0.22 : 0.04);
+    const g = env(t, 0.2 * vel, 0.001, open ? 0.22 : 0.04);
     n.connect(hp);
     hp.connect(g);
     g.connect(bus);
   };
   const bass = (t: number, m: number, len: number) => {
-    const o = osc("sawtooth", midi(m), t, len + 0.05);
+    const o = osc("sawtooth", midi(m + 12), t, len + 0.05);
     const lp = ctx.createBiquadFilter();
     lp.type = "lowpass";
-    lp.frequency.value = 420;
+    lp.frequency.value = 1100;
     lp.Q.value = 1.2;
     const g = ctx.createGain();
     g.gain.setValueAtTime(0.0001, t);
@@ -147,7 +166,7 @@ export function scheduleBeat(
     lp.type = "lowpass";
     lp.frequency.setValueAtTime(3200, t);
     lp.frequency.exponentialRampToValueAtTime(900, t + 0.3);
-    const g = env(t, 0.17 * vel, 0.004, 0.34);
+    const g = env(t, 0.24 * vel, 0.004, 0.34);
     o.connect(lp);
     lp.connect(g);
     g.connect(bus);
@@ -182,17 +201,16 @@ export function scheduleBeat(
       if (b * 16 + s >= steps) break;
       const t = bt + s * step;
       if (s % 2 === 0) pluck(t, chord.tones[ARP[s / 2]] + 12, s % 4 === 0 ? 1 : 0.7);
-      if (b >= 1) {
-        if (s === 0 || s === 7 || s === 10) kick(t);
-        if (s === 4 || s === 12) snare(t);
-        if (s % 2 === 0) hat(t, s % 4 === 0 ? 1 : 0.6, false);
-        else hat(t, 0.35, false);
-        if (s === 14) hat(t, 1, true);
-        const k = BASS_STEPS.indexOf(s);
-        if (k >= 0) bass(t, chord.bass + BASS_OFFSETS[k], step * 2.4);
-      } else if (s === 0) {
-        bass(t, chord.bass, barLen * 0.9);
-      }
+      // the full groove starts right away, so the beat is clearly heard from the first second
+      if (s === 0 || s === 7 || s === 10) kick(t);
+      if (s === 4 || s === 12) snare(t);
+      if (s % 2 === 0) hat(t, s % 4 === 0 ? 1 : 0.6, false);
+      else hat(t, 0.35, false);
+      if (s === 14) hat(t, 1, true);
+      if (s === 3 || s === 11) conga(t, false);
+      if (s === 6 || s === 14) conga(t, true);
+      const k = BASS_STEPS.indexOf(s);
+      if (k >= 0) bass(t, chord.bass + BASS_OFFSETS[k], step * 2.4);
     }
   }
 }
