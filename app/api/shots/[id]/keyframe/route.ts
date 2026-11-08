@@ -14,6 +14,7 @@ type CharRow = {
   appearance: string;
   clothing: string;
   reference_urls: string[] | null;
+  user_photo: boolean;
 };
 
 export async function POST(_: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -29,10 +30,30 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
 
   // Characters appearing in this shot, with their reference portraits.
   const { data } = shot.character_ids.length
-    ? await supabase.from("characters").select("name,age,appearance,clothing,reference_urls").in("id", shot.character_ids)
+    ? await supabase
+        .from("characters")
+        .select("name,age,appearance,clothing,reference_urls,user_photo")
+        .in("id", shot.character_ids)
     : { data: [] as CharRow[] };
   const chars = (data ?? []) as CharRow[];
   const withRef = chars.filter((c) => c.reference_urls && c.reference_urls.length > 0);
+
+  // Free mode cannot place a real photo into a new scene, so the user's own photo is used as the picture.
+  if (demo) {
+    const own = chars.find((c) => c.user_photo && c.reference_urls && c.reference_urls.length > 0);
+    if (own) {
+      const dest = `${user.id}/${shot.project_id}/${id}-${Date.now()}.jpg`;
+      const { error: copyErr } = await adminClient()
+        .storage.from("character-refs")
+        .copy(own.reference_urls![0], dest, { destinationBucket: "keyframes" });
+      if (copyErr) return NextResponse.json({ error: "Imeshindwa kutumia picha yako." }, { status: 500 });
+      await adminClient()
+        .from("shots")
+        .update({ keyframe_url: dest, status: "draft", error: null })
+        .eq("id", id);
+      return NextResponse.json({ ok: true });
+    }
+  }
 
   if (!demo && chars.length > withRef.length) {
     return NextResponse.json({ error: "Tengeneza sura za wahusika wa shot hii kwanza." }, { status: 400 });
