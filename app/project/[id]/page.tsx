@@ -34,6 +34,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
       appearance: c.appearance ?? "",
       status: c.status,
       error: c.error,
+      userPhoto: !!c.user_photo,
       imageUrl: await signedUrl("character-refs", c.reference_urls?.[0]),
     }))
   );
@@ -54,6 +55,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
             status: sh.status,
             error: sh.error,
             duration: sh.duration_seconds,
+            characterIds: (sh.character_ids ?? []) as string[],
             people: (sh.character_ids ?? []).map((cid: string) => nameById.get(cid)).filter(Boolean) as string[],
             keyframeUrl: await signedUrl("keyframes", sh.keyframe_url),
             videoUrl: await signedUrl("videos", sh.video_url),
