@@ -43,7 +43,10 @@ export async function POST(req: NextRequest) {
       if (kind === "character") {
         const path = `${userId}/${row.project_id}/${id}-${Date.now()}.jpg`;
         await storeFromUrl("character-refs", path, mediaUrl);
-        await db.from("characters").update({ reference_urls: [path], status: "completed", error: null }).eq("id", id);
+        await db
+          .from("characters")
+          .update({ reference_urls: [path], status: "completed", user_photo: false, error: null })
+          .eq("id", id);
       } else if (kind === "keyframe") {
         const path = `${userId}/${row.project_id}/${id}-${Date.now()}.jpg`;
         await storeFromUrl("keyframes", path, mediaUrl);
