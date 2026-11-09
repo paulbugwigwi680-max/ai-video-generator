@@ -1,7 +1,9 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Bricolage_Grotesque, Public_Sans } from "next/font/google";
 import "./globals.css";
 import { appUrl } from "@/lib/config";
+import PwaRegister from "@/components/PwaRegister";
+import BottomNav from "@/components/BottomNav";
 
 const head = Bricolage_Grotesque({ subsets: ["latin"], variable: "--font-bricolage" });
 const body = Public_Sans({ subsets: ["latin"], variable: "--font-public" });
@@ -33,8 +35,18 @@ export const metadata: Metadata = {
   },
   twitter: { card: "summary_large_image", title: TITLE, description: DESCRIPTION },
   robots: { index: true, follow: true },
+  appleWebApp: { capable: true, title: "BUGWIGWI", statusBarStyle: "black-translucent" },
+  formatDetection: { telephone: false },
   // Optional: only needed if you verify Google Search Console with the meta tag method.
   verification: { google: process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION },
+};
+
+// Phone look: dark status bar, content can use the whole screen (notch safe areas are handled in CSS).
+export const viewport: Viewport = {
+  themeColor: "#17212b",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -53,6 +65,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="sw" className={`${head.variable} ${body.variable}`}>
       <body>
         {children}
+        <BottomNav />
+        <PwaRegister />
         <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
       </body>
     </html>
