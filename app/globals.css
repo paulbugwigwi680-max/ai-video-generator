@@ -301,3 +301,54 @@ button.pw-toggle:hover { background: #e6ebef; color: var(--ink); }
 .thumb.on .thumb-btn { border-color: var(--sea); }
 .thumb-btn img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .thumb-x { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; padding: 0; border-radius: 50%; background: var(--ink); color: #fff; font-size: 14px; line-height: 1; }
+/* ================= PHONE APP ================= */
+html { -webkit-tap-highlight-color: transparent; }
+body { overscroll-behavior-y: none; }
+.topbar { padding-top: calc(12px + env(safe-area-inset-top)); }
+
+.bottomnav, .bottomnav-space { display: none; }
+
+@media (max-width: 760px) {
+  button, .btn, .btn-big, .filebtn { min-height: 44px; }
+  input, textarea, select { font-size: 16px; } /* stops iPhone from zooming into fields */
+  .topbar { flex-wrap: wrap; gap: 8px; }
+  .wrap { padding-top: 20px; }
+  .doc canvas, .talk canvas { max-width: 100% !important; }
+  .bulk button, .controls button { flex: 1 1 100%; }
+  .tx { display: block; overflow-x: auto; white-space: nowrap; }
+
+  .bottomnav {
+    display: flex;
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 50;
+    background: var(--ink);
+    border-top: 1px solid #2a3846;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .bottomnav a {
+    flex: 1;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 9px 4px 7px;
+    color: #aab6c0;
+    text-decoration: none;
+    font-size: 0.72rem; font-weight: 600;
+  }
+  .bottomnav a.on { color: var(--sand); }
+  .bottomnav-space { display: block; height: calc(64px + env(safe-area-inset-bottom)); }
+}
+
+/* "Install on your phone" banner */
+.install {
+  position: fixed;
+  left: 12px; right: 12px; bottom: 12px;
+  z-index: 60;
+  background: var(--paper);
+  border-left: 4px solid var(--sea);
+  border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(23, 33, 43, 0.25);
+  padding: 14px 16px;
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+}
+@media (max-width: 760px) { .install { bottom: calc(76px + env(safe-area-inset-bottom)); } }
+@media (min-width: 761px) { .install { max-width: 520px; left: auto; } }
