@@ -77,7 +77,20 @@ export function analyzeNarration(buf: AudioBuffer): Narration {
     else break;
   }
   const first = segs[0].a;
-  const end = segs[segs.length - 1].b;
+  let end = segs[segs.length - 1].b;
+
+  // A hissy tail ("chiii") can also be glued to the last word, so no gap separates them.
+  // Words in Kiswahili end in vowels, which are never hissy: a long, very hissy, quiet run
+  // at the very end is noise, so it is cut off (up to 0.6 s).
+  {
+    let run = 0;
+    let f = end - 1;
+    while (f > first && run < 60 && zcr[f] > 0.22 && rms[f] < ref * 0.5) {
+      run++;
+      f--;
+    }
+    if (run >= 15) end -= run;
+  }
 
   // gate: open slightly before speech, close slowly after it
   const target = new Float32Array(frames);
@@ -145,4 +158,38 @@ export function makeMaster(ctx: BaseAudioContext, rec: MediaStreamAudioDestinati
 export function fadeOutMaster(master: GainNode, at: number, seconds: number) {
   master.gain.setValueAtTime(master.gain.value, at);
   master.gain.linearRampToValueAtTime(0, at + seconds);
+}
+
+// Last safety net for the finished soundtrack (used before it is written into the MP4).
+//  - tiny fade-in, so the file never starts with a click,
+//  - smooth fade-out over the last seconds and an exact digital silence at the very end,
+//    so nothing (hiss, "chiii", an encoder click) can be heard when the video finishes,
+//  - hard ceiling, so the AAC encoder never clips.
+export function finalizeMix(buf: AudioBuffer, fadeOutSeconds = 0.9) {
+  const x = buf.getChannelData(0);
+  const sr = buf.sampleRate;
+  const n = x.length;
+  const fin = Math.min(n, Math.round(sr * 0.01));
+  for (let i = 0; i < fin; i++) x[i] *= i / fin;
+  const f = Math.min(n, Math.round(sr * fadeOutSeconds));
+  for (let i = 0; i < f; i++) x[n - f + i] *= 0.5 * (1 + Math.cos((Math.PI * i) / f));
+  const z = Math.min(n, Math.round(sr * 0.12));
+  for (let i = n - z; i < n; i++) x[i] = 0;
+  for (let i = 0; i < n; i++) {
+    if (x[i] > 0.97) x[i] = 0.97;
+    else if (x[i] < -0.97) x[i] = -0.97;
+  }
+}
+
+// Reports whether a soundtrack really contains sound (used to warn about a silent video).
+export function loudness(buf: AudioBuffer): { rms: number; peak: number } {
+  const x = buf.getChannelData(0);
+  let s = 0;
+  let peak = 0;
+  for (let i = 0; i < x.length; i += 3) {
+    const a = Math.abs(x[i]);
+    s += a * a;
+    if (a > peak) peak = a;
+  }
+  return { rms: Math.sqrt(s / Math.max(1, x.length / 3)), peak };
 }
