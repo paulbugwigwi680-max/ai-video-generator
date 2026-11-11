@@ -5,7 +5,7 @@ import { pickVoice, voicesFor } from "@/lib/voices";
 import { AI_VOICES, DEFAULT_AI_VOICE } from "@/lib/tts-voices";
 import { fetchNarration, newAudioContext } from "@/lib/narration-client";
 import { uploadToCloudinary } from "@/lib/cloudinary-client";
-import { analyzeNarration, fadeOutMaster, makeMaster, playFaded, type Narration } from "@/lib/audio-utils";
+import { analyzeNarration, fadeOutMaster, finalizeMix, loudness, makeMaster, playFaded, type Narration } from "@/lib/audio-utils";
 import { scheduleBeat, type Interval } from "@/lib/beat";
 import { blurredBackground, fitRect } from "@/lib/frame-fit";
 import { canExportMp4, renderMp4 } from "@/lib/mp4-render";
@@ -96,6 +96,52 @@ function seekVideo(v: HTMLVideoElement, time: number): Promise<void> {
     v.currentTime = time;
     setTimeout(done, 1500);
   });
+}
+
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Prepares the AI narration of every scene. One scene failing (busy server, free limit) no longer
+// throws away all the other scenes: each scene is retried, and the ones that worked are kept.
+async function narrateScenes(
+  ctx: BaseAudioContext,
+  clips: Clip[],
+  voice: string,
+  onStep: (n: number, total: number) => void
+) {
+  const audio = new Map<number, Narration>();
+  const scenes = Array.from(new Set(clips.map((c) => c.scene)));
+  let failed = 0;
+  let lastError = "";
+  let n = 0;
+  for (const sc of scenes) {
+    n++;
+    const text = clips.find((c) => c.scene === sc && c.speak)?.speak;
+    if (!text) continue;
+    onStep(n, scenes.length);
+    let ok = false;
+    for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+      try {
+        audio.set(sc, analyzeNarration(await fetchNarration(ctx, text, voice)));
+        ok = true;
+      } catch (e) {
+        lastError = (e as Error).message;
+        if (attempt < 2) await sleepMs(1500 * (attempt + 1));
+      }
+    }
+    if (!ok) failed++;
+  }
+  return { audio, failed, lastError };
+}
+
+// Opens the finished MP4 again and checks that its sound track really has sound in it.
+async function checkFileSound(blob: Blob): Promise<"ok" | "silent" | "unknown"> {
+  try {
+    const dec = new OfflineAudioContext(1, 1, 48000);
+    const buf = await dec.decodeAudioData(await blob.arrayBuffer());
+    return loudness(buf).peak > 0.01 ? "ok" : "silent";
+  } catch {
+    return "unknown"; // this browser cannot read it back; that does not mean it is silent
+  }
 }
 
 // Draws one frame of the documentary at time t (seconds). Returns the index of the active clip.
@@ -327,32 +373,28 @@ export default function Documentary({
     setShareMsg("");
     setExportPct(0);
 
+    const notes: string[] = [];
     try {
-      // 1. Narration (AI voice). It is decoded with an offline context, so no sound plays now.
-      let audio: Map<number, Narration> | null = null;
+      // 1. Narration (AI voice). Decoded with an offline context, so nothing plays now.
+      let audio = new Map<number, Narration>();
       if (voiceMode === "ai") {
-        try {
-          const dec = new OfflineAudioContext(1, 1, 48000);
-          audio = new Map();
-          const scenes = Array.from(new Set(clips.map((c) => c.scene)));
-          let n = 0;
-          for (const sc of scenes) {
-            const text = clips.find((c) => c.scene === sc && c.speak)?.speak;
-            n++;
-            if (!text) continue;
-            setPrep(`Inaandaa sauti ya AI… ${n}/${scenes.length}`);
-            audio.set(sc, analyzeNarration(await fetchNarration(dec, text, aiVoice)));
-          }
-        } catch (e) {
-          setMsg(`${(e as Error).message} MP4 itatoka bila sauti.`);
-          audio = null;
-        }
+        const dec = new OfflineAudioContext(1, 1, 48000);
+        const r = await narrateScenes(dec, clips, aiVoice, (n, t) => setPrep(`Inaandaa sauti ya AI… ${n}/${t}`));
+        audio = r.audio;
         setPrep("");
+        if (r.failed > 0) {
+          notes.push(
+            audio.size === 0
+              ? `Simulizi ya AI haikupatikana (${r.lastError}).`
+              : `Simulizi ya maeneo ${r.failed} haikupatikana (${r.lastError}).`
+          );
+          notes.push("Bonyeza 'Pakua MP4' tena baada ya muda mfupi: maeneo yaliyofanikiwa hayarudiwi.");
+        }
       } else {
-        setMsg("Sauti ya kifaa haiingii kwenye video. Chagua 'Sauti ya AI' ili MP4 iwe na sauti.");
+        notes.push("Sauti ya kifaa haiwezi kuingia kwenye faili la video. Chagua 'Sauti ya AI' ili simulizi iwemo.");
       }
-      const hasAudio = !!audio && audio.size > 0;
-      const plan = buildPlan(clips, hasAudio ? audio : null);
+      const hasNarr = audio.size > 0;
+      const plan = buildPlan(clips, hasNarr ? audio : null);
 
       // 2. Make sure every picture is loaded.
       await Promise.all(
@@ -366,9 +408,10 @@ export default function Documentary({
         )
       );
 
-      // 3. Mix narration + beat offline (exact length, no real-time glitches).
+      // 3. Mix narration + beat offline (exact length). The beat no longer depends on the narration:
+      //    even if the voice is missing, the file still carries the instrumental from start to end.
       let rendered: AudioBuffer | null = null;
-      if (hasAudio && audio) {
+      if (hasNarr || beat) {
         const sr = 48000;
         const off = new OfflineAudioContext(1, Math.ceil(plan.total * sr), sr);
         const master = makeMaster(off, null);
@@ -376,12 +419,16 @@ export default function Documentary({
           const at = plan.sceneStarts.get(scene);
           if (at !== undefined) playFaded(off, master, narr, at + LEAD);
         });
-        if (beat) scheduleBeat(off, master, 0, plan.total, speechIntervals(plan, audio));
+        if (beat) scheduleBeat(off, master, 0, plan.total, hasNarr ? speechIntervals(plan, audio) : []);
         fadeOutMaster(master, plan.total - END_FADE, END_FADE * 0.8);
         rendered = await off.startRendering();
+        finalizeMix(rendered, END_FADE + 0.2); // clean start, smooth end, digital silence at the very end
+      } else {
+        notes.push("Video hii itatoka bila sauti kwa sababu simulizi na beat vimezimwa.");
       }
 
       // 4. Render every frame and write the MP4.
+      let codec = "aac" as "aac" | "opus";
       const state = { idx: -1 };
       const blob = await renderMp4({
         canvas,
@@ -390,6 +437,9 @@ export default function Documentary({
         duration: plan.total,
         audio: rendered,
         onProgress: setExportPct,
+        onAudioCodec: (c) => {
+          codec = c;
+        },
         drawAt: async (t) => {
           let i = plan.clips.findIndex((c, k) => t >= plan.starts[k] && t < plan.starts[k] + c.duration);
           if (i < 0) i = plan.clips.length - 1;
@@ -404,6 +454,18 @@ export default function Documentary({
       });
       saveBlob(blob, `${fileBase()}.mp4`);
       drawFrame(ctx, base.clips, base.starts, mediaRef.current, 0.6, base.total, { idx: -1 });
+
+      // 5. Check the saved file really has sound, and tell the person clearly.
+      if (rendered) {
+        setPrep("Inakagua sauti ya faili…");
+        const check = await checkFileSound(blob);
+        setPrep("");
+        if (check === "silent") notes.push("Onyo: faili limetoka bila sauti. Jaribu Chrome au Edge ya kompyuta.");
+        else if (check === "ok")
+          notes.unshift(`Sauti imethibitishwa kwenye faili${hasNarr ? " (simulizi" + (beat ? " + beat" : "") + ")" : " (beat tu)"}.`);
+        if (codec === "opus")
+          notes.push("Sauti ya faili ni Opus (kivinjari hiki hakiwezi AAC). Inacheza Chrome, Edge, Firefox na VLC; kama simu yako haichezi, ifungue kwa VLC.");
+      }
     } catch (e) {
       const m = (e as Error).message;
       busyRef.current = false;
@@ -417,6 +479,7 @@ export default function Documentary({
       }
       return;
     }
+    if (notes.length) setMsg(notes.join(" "));
     setExportPct(null);
     busyRef.current = false;
   }
@@ -436,30 +499,28 @@ export default function Documentary({
     setMsg((m) => (record ? m : ""));
     setShareMsg("");
 
-    // 1. Narration audio (AI voice).
+    // 1. Audio context (needed for AI voice and for the beat) + narration (AI voice).
     let actx: AudioContext | null = null;
     let audio: Map<number, Narration> | null = null;
-    if (voiceMode === "ai") {
+    if (voiceMode === "ai" || beat) {
       try {
         actx = newAudioContext();
         await actx.resume();
-        audio = new Map();
-        const scenes = Array.from(new Set(clips.map((c) => c.scene)));
-        let n = 0;
-        for (const sc of scenes) {
-          const text = clips.find((c) => c.scene === sc && c.speak)?.speak;
-          n++;
-          if (!text) continue;
-          setPrep(`Inaandaa sauti ya AI… ${n}/${scenes.length}`);
-          audio.set(sc, analyzeNarration(await fetchNarration(actx, text, aiVoice)));
-        }
-      } catch (e) {
-        setMsg(`${(e as Error).message} Inatumika sauti ya kifaa badala yake (haiingii kwenye faili la video).`);
-        actx?.close().catch(() => {});
+      } catch {
         actx = null;
-        audio = null;
       }
+    }
+    if (voiceMode === "ai" && actx) {
+      const r = await narrateScenes(actx, clips, aiVoice, (n, t) => setPrep(`Inaandaa sauti ya AI… ${n}/${t}`));
+      audio = r.audio;
       setPrep("");
+      if (r.failed > 0) {
+        setMsg(
+          audio.size === 0
+            ? `${r.lastError} Inatumika sauti ya kifaa badala yake (haiingii kwenye faili la video).`
+            : `Simulizi ya maeneo ${r.failed} haikupatikana (${r.lastError}). Jaribu tena baada ya muda mfupi.`
+        );
+      }
     }
     const hasAiAudio = !!actx && !!audio && audio.size > 0;
     const plan = buildPlan(clips, hasAiAudio ? audio : null);
@@ -468,7 +529,7 @@ export default function Documentary({
     let completed = false;
     let recorder: MediaRecorder | null = null;
     const chunks: Blob[] = [];
-    const dest = hasAiAudio && actx ? actx.createMediaStreamDestination() : null;
+    const dest = actx ? actx.createMediaStreamDestination() : null;
     if (record) {
       const tracks = [...canvas.captureStream(30).getVideoTracks(), ...(dest ? dest.stream.getAudioTracks() : [])];
       const candidates = dest
@@ -488,20 +549,27 @@ export default function Documentary({
         const type = recorder?.mimeType || "video/webm";
         saveBlob(new Blob(chunks, { type }), `${fileBase()}.${type.includes("mp4") ? "mp4" : "webm"}`);
       };
-      if (!dest) setMsg((m) => m || "Rekodi hii haitakuwa na sauti (sauti ya AI haikupatikana).");
+      if (!dest) setMsg((m) => m || "Rekodi hii haitakuwa na sauti (washa beat au chagua Sauti ya AI).");
     }
 
     // 3. Schedule narration and beat against the audio clock, through one clean master output.
+    //    The beat plays even when there is no AI narration (then it stays at the lower, "under the voice" level
+    //    if a device voice speaks, or at full level when nothing speaks).
     const sources: AudioBufferSourceNode[] = [];
-    if (actx && audio && hasAiAudio) {
-      const master = makeMaster(actx, dest);
+    let master: GainNode | null = null;
+    if (actx && (hasAiAudio || beat)) {
+      master = makeMaster(actx, dest);
       const a0 = actx.currentTime + 0.15;
-      audio.forEach((narr, scene) => {
-        const at = plan.sceneStarts.get(scene);
-        if (at === undefined) return;
-        sources.push(playFaded(actx!, master, narr, a0 + at + LEAD));
-      });
-      if (beat) scheduleBeat(actx, master, a0, plan.total, speechIntervals(plan, audio));
+      if (audio && hasAiAudio) {
+        audio.forEach((narr, scene) => {
+          const at = plan.sceneStarts.get(scene);
+          if (at === undefined) return;
+          sources.push(playFaded(actx!, master!, narr, a0 + at + LEAD));
+        });
+      }
+      const deviceTalks = !hasAiAudio && !record && !!window.speechSynthesis;
+      const intervals = hasAiAudio && audio ? speechIntervals(plan, audio) : deviceTalks ? [{ start: 0, end: plan.total }] : [];
+      if (beat) scheduleBeat(actx, master, a0, plan.total, intervals);
       fadeOutMaster(master, a0 + plan.total - END_FADE, END_FADE * 0.8);
     }
 
@@ -541,17 +609,31 @@ export default function Documentary({
       mediaRef.current.forEach((m) => {
         if (m instanceof HTMLVideoElement) m.pause();
       });
-      sources.forEach((s) => {
+      // Soft stop: ramp everything to silence first, then stop the sources and close the context.
+      const ac = actx;
+      const m = master;
+      if (ac && m) {
         try {
-          s.stop();
+          const now = ac.currentTime;
+          m.gain.cancelScheduledValues(now);
+          m.gain.setValueAtTime(m.gain.value, now);
+          m.gain.linearRampToValueAtTime(0, now + 0.15);
         } catch {
-          /* already stopped */
+          /* context already closed */
         }
-      });
+      }
+      setTimeout(() => {
+        sources.forEach((src) => {
+          try {
+            src.stop();
+          } catch {
+            /* already stopped */
+          }
+        });
+      }, ac ? 220 : 0);
       synth?.cancel();
       const r = recorder;
-      if (r && r.state !== "inactive") setTimeout(() => r.stop(), 400);
-      const ac = actx;
+      if (r && r.state !== "inactive") setTimeout(() => r.stop(), 500);
       if (ac) setTimeout(() => ac.close().catch(() => {}), 900);
       setPlaying(false);
       setRecording(false);
@@ -631,7 +713,7 @@ export default function Documentary({
 
         <label className="check">
           <input type="checkbox" checked={beat} onChange={(e) => setBeat(e.target.checked)} disabled={playing || working} />
-          <span>Beat ya nyuma (instrumental): inasikika wakati msimulizi amenyamaza na inapungua anapoongea</span>
+          <span>Beat ya nyuma (instrumental): inacheza kuanzia mwanzo hadi mwisho wa video, na inapungua msimulizi anapoongea</span>
         </label>
       </div>
 
