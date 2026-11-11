@@ -68,7 +68,7 @@ export async function POST(req: Request) {
   const text = style ? `Say ${style}: ${spoken}` : spoken;
 
   const models = Array.from(
-    new Set([env("GEMINI_TTS_MODEL") ?? "gemini-3.8-flash-tts", env("GEMINI_TTS_FALLBACK_MODEL") ?? "gemini-3.1-flash-tts-preview"])
+    new Set([env("GEMINI_TTS_MODEL") ?? "gemini-3.1-flash-tts-preview", env("GEMINI_TTS_FALLBACK_MODEL") ?? "gemini-2.5-flash-preview-tts"])
   );
 
   let lastStatus = 502;
