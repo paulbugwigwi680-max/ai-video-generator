@@ -27,7 +27,7 @@ export function scheduleBeat(
   const step = 60 / 96 / 4; // one 16th note
   const steps = Math.floor(duration / step);
   const HI = 0.9; // level in the silences
-  const LO = 0.26; // level under the voice (still clearly audible, like a music bed)
+  const LO = 0.32; // level under the voice (still clearly audible, like a music bed)
 
   // Level bus: its gain curve ducks under speech and fades in/out.
   const bus = ctx.createGain();
@@ -57,7 +57,7 @@ export function scheduleBeat(
       const up = clamp01((t - iv.end) / 0.6);
       duck = Math.min(duck, 1 - down * (1 - up) * (1 - LO / HI));
     }
-    const fade = Math.min(1, t / 0.6, Math.max(0, (duration - t) / 1.4));
+    const fade = Math.min(1, t / 0.25, Math.max(0, (duration - t) / 1.2));
     curve[i] = HI * fade * duck;
   }
   bus.gain.setValueCurveAtTime(curve, t0, duration);
