@@ -22,6 +22,7 @@ export type Mp4Options = {
   audio: AudioBuffer | null; // mono, 48000 Hz
   drawAt: (t: number) => Promise<void> | void; // draw the frame for time t onto the canvas
   onProgress?: (pct: number) => void;
+  onAudioCodec?: (codec: "aac" | "opus") => void; // which sound format ended up in the file
 };
 
 export async function renderMp4(o: Mp4Options): Promise<Blob> {
@@ -45,24 +46,36 @@ export async function renderMp4(o: Mp4Options): Promise<Blob> {
   }
   if (!videoCfg) throw new Error("Kivinjari hiki hakiwezi kutengeneza MP4.");
 
-  // AAC audio (needed for sound inside an MP4).
+  // Audio: AAC plays everywhere, but some browsers (many Android / Linux Chrome builds) cannot
+  // encode it. Then we use Opus inside the MP4 instead of losing the sound.
   let audioCfg: any = null;
+  let audioKind: "aac" | "opus" = "aac";
   if (o.audio) {
-    const cfg = { codec: "mp4a.40.2", sampleRate: 48000, numberOfChannels: 1, bitrate: 128_000 };
-    try {
-      const s = typeof g.AudioEncoder !== "undefined" ? await g.AudioEncoder.isConfigSupported(cfg) : null;
-      if (s?.supported) audioCfg = cfg;
-    } catch {
-      /* unsupported */
+    const options: { kind: "aac" | "opus"; cfg: any }[] = [
+      { kind: "aac", cfg: { codec: "mp4a.40.2", sampleRate: 48000, numberOfChannels: 1, bitrate: 128_000 } },
+      { kind: "opus", cfg: { codec: "opus", sampleRate: 48000, numberOfChannels: 1, bitrate: 96_000 } },
+    ];
+    for (const opt of options) {
+      try {
+        const s = typeof g.AudioEncoder !== "undefined" ? await g.AudioEncoder.isConfigSupported(opt.cfg) : null;
+        if (s?.supported) {
+          audioCfg = opt.cfg;
+          audioKind = opt.kind;
+          break;
+        }
+      } catch {
+        /* try the next one */
+      }
     }
     if (!audioCfg) throw new Error("AAC_UNSUPPORTED");
+    o.onAudioCodec?.(audioKind);
   }
 
   const target = new ArrayBufferTarget();
   const muxer = new Muxer({
     target,
     video: { codec: "avc", width: o.width, height: o.height },
-    ...(audioCfg ? { audio: { codec: "aac", numberOfChannels: 1, sampleRate: 48000 } } : {}),
+    ...(audioCfg ? { audio: { codec: audioKind, numberOfChannels: 1, sampleRate: 48000 } } : {}),
     fastStart: "in-memory",
   } as any);
 
