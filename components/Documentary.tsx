@@ -6,7 +6,7 @@ import { AI_VOICES, DEFAULT_AI_VOICE } from "@/lib/tts-voices";
 import { fetchNarration, newAudioContext } from "@/lib/narration-client";
 import { uploadToCloudinary } from "@/lib/cloudinary-client";
 import { analyzeNarration, fadeOutMaster, finalizeMix, loudness, makeMaster, playFaded, type Narration } from "@/lib/audio-utils";
-import { scheduleBeat, type Interval } from "@/lib/beat";
+import { BEAT_STYLES, scheduleBeat, type BeatStyleId, type Interval } from "@/lib/beat";
 import { blurredBackground, fitRect } from "@/lib/frame-fit";
 import { canExportMp4, renderMp4 } from "@/lib/mp4-render";
 
@@ -245,6 +245,8 @@ export default function Documentary({
   const [voiceMode, setVoiceMode] = useState<"ai" | "device">("ai");
   const [aiVoice, setAiVoice] = useState(DEFAULT_AI_VOICE);
   const [beat, setBeat] = useState(true);
+  const [beatStyle, setBeatStyle] = useState<BeatStyleId>("classic");
+  const [previewing, setPreviewing] = useState(false);
   const [deviceVoices, setDeviceVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [deviceVoice, setDeviceVoice] = useState("");
 
@@ -419,7 +421,7 @@ export default function Documentary({
           const at = plan.sceneStarts.get(scene);
           if (at !== undefined) playFaded(off, master, narr, at + LEAD);
         });
-        if (beat) scheduleBeat(off, master, 0, plan.total, hasNarr ? speechIntervals(plan, audio) : []);
+        if (beat) scheduleBeat(off, master, 0, plan.total, hasNarr ? speechIntervals(plan, audio) : [], beatStyle);
         fadeOutMaster(master, plan.total - END_FADE, END_FADE * 0.8);
         rendered = await off.startRendering();
         finalizeMix(rendered, END_FADE + 0.2); // clean start, smooth end, digital silence at the very end
@@ -569,7 +571,7 @@ export default function Documentary({
       }
       const deviceTalks = !hasAiAudio && !record && !!window.speechSynthesis;
       const intervals = hasAiAudio && audio ? speechIntervals(plan, audio) : deviceTalks ? [{ start: 0, end: plan.total }] : [];
-      if (beat) scheduleBeat(actx, master, a0, plan.total, intervals);
+      if (beat) scheduleBeat(actx, master, a0, plan.total, intervals, beatStyle);
       fadeOutMaster(master, a0 + plan.total - END_FADE, END_FADE * 0.8);
     }
 
@@ -664,6 +666,26 @@ export default function Documentary({
     raf = requestAnimationFrame(tick);
   }
 
+  // Plays 10 seconds of the chosen beat so you can pick one before making the video.
+  async function previewBeat() {
+    if (previewing) return;
+    setPreviewing(true);
+    try {
+      const ac = newAudioContext();
+      await ac.resume();
+      const master = makeMaster(ac, null);
+      const a0 = ac.currentTime + 0.1;
+      scheduleBeat(ac, master, a0, 10, [], beatStyle);
+      fadeOutMaster(master, a0 + 9.2, 0.7);
+      setTimeout(() => {
+        ac.close().catch(() => {});
+        setPreviewing(false);
+      }, 10600);
+    } catch {
+      setPreviewing(false);
+    }
+  }
+
   const working = prep !== "" || exportPct !== null;
 
   return (
@@ -715,6 +737,24 @@ export default function Documentary({
           <input type="checkbox" checked={beat} onChange={(e) => setBeat(e.target.checked)} disabled={playing || working} />
           <span>Beat ya nyuma (instrumental): inacheza kuanzia mwanzo hadi mwisho wa video, na inapungua msimulizi anapoongea</span>
         </label>
+
+        <label htmlFor="beatstyle">Chagua beat</label>
+        <div className="row">
+          <select
+            id="beatstyle"
+            value={beatStyle}
+            onChange={(e) => setBeatStyle(e.target.value as BeatStyleId)}
+            disabled={!beat || playing || working}
+            style={{ flex: 1, minWidth: 200 }}
+          >
+            {BEAT_STYLES.map((b) => (
+              <option key={b.id} value={b.id}>{b.label}</option>
+            ))}
+          </select>
+          <button type="button" className="ghost" onClick={previewBeat} disabled={!beat || previewing || playing || working}>
+            {previewing ? "Inacheza…" : "▶ Sikiliza beat"}
+          </button>
+        </div>
       </div>
 
       {prep && <p className="muted">{prep}</p>}
