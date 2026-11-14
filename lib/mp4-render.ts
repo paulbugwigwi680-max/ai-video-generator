@@ -81,6 +81,41 @@ export async function renderMp4(o: Mp4Options): Promise<Blob> {
 
   let failure: unknown = null;
 
+  // ---- audio encoder: sound is fed together with the video (interleaved), not after it,
+  //      so every player finds picture and sound side by side in the file ----
+  let aenc: any = null;
+  let aOff = 0;
+  const feedAudio = async (untilSample: number) => {
+    if (!aenc || !o.audio) return;
+    const data = o.audio.getChannelData(0);
+    const end = Math.min(data.length, untilSample);
+    const step = 4800;
+    while (aOff < end) {
+      const slice = data.slice(aOff, Math.min(data.length, aOff + step));
+      const ad = new g.AudioData({
+        format: "f32-planar",
+        sampleRate: 48000,
+        numberOfFrames: slice.length,
+        numberOfChannels: 1,
+        timestamp: Math.round((aOff / 48000) * 1e6),
+        data: slice,
+      });
+      aenc.encode(ad);
+      ad.close();
+      aOff += slice.length;
+      while (aenc.encodeQueueSize > 8) await sleep(4);
+    }
+  };
+  if (audioCfg && o.audio) {
+    aenc = new g.AudioEncoder({
+      output: (chunk: any, meta: any) => (muxer as any).addAudioChunk(chunk, meta),
+      error: (e: unknown) => {
+        failure = e;
+      },
+    });
+    aenc.configure(audioCfg);
+  }
+
   // ---- video ----
   const venc = new g.VideoEncoder({
     output: (chunk: any, meta: any) => (muxer as any).addVideoChunk(chunk, meta),
@@ -93,6 +128,7 @@ export async function renderMp4(o: Mp4Options): Promise<Blob> {
   for (let i = 0; i < frames; i++) {
     if (failure) throw failure;
     await o.drawAt(i / fps);
+    await feedAudio(Math.ceil((i / fps + 1) * 48000));
     const frame = new g.VideoFrame(o.canvas, {
       timestamp: Math.round((i * 1e6) / fps),
       duration: Math.round(1e6 / fps),
@@ -108,31 +144,9 @@ export async function renderMp4(o: Mp4Options): Promise<Blob> {
   await venc.flush();
   venc.close();
 
-  // ---- audio ----
-  if (audioCfg && o.audio) {
-    const aenc = new g.AudioEncoder({
-      output: (chunk: any, meta: any) => (muxer as any).addAudioChunk(chunk, meta),
-      error: (e: unknown) => {
-        failure = e;
-      },
-    });
-    aenc.configure(audioCfg);
-    const data = o.audio.getChannelData(0);
-    const step = 4800;
-    for (let off = 0; off < data.length; off += step) {
-      const slice = data.slice(off, Math.min(data.length, off + step));
-      const ad = new g.AudioData({
-        format: "f32-planar",
-        sampleRate: 48000,
-        numberOfFrames: slice.length,
-        numberOfChannels: 1,
-        timestamp: Math.round((off / 48000) * 1e6),
-        data: slice,
-      });
-      aenc.encode(ad);
-      ad.close();
-      while (aenc.encodeQueueSize > 8) await sleep(4);
-    }
+  // ---- audio: flush the remaining sound ----
+  if (aenc && o.audio) {
+    await feedAudio(o.audio.length);
     await aenc.flush();
     aenc.close();
   }
